@@ -9,7 +9,7 @@ import numpy as np
 from typing import Dict, Optional
 
 # Local imports
-from models.constants import DEFAULT_CHANNEL_MIXER
+
 from models.core import ChannelMixerSettings
 
 
@@ -34,39 +34,21 @@ def apply_channel_mixing_to_responses(
     Example:
         For R-G swap: red output gets green response, green output gets red response
     """
-    if not mixer_settings.enabled:
-        return rgb_responses
-    
-    # Get a reference shape from any available response
-    if not rgb_responses:
+    if not mixer_settings.enabled or not rgb_responses:
         return rgb_responses
     
     reference_shape = next(iter(rgb_responses.values())).shape
     zero_array = np.zeros(reference_shape)
     
-    # Get original responses with fallback to zeros
-    r_orig = rgb_responses.get('R', zero_array)
-    g_orig = rgb_responses.get('G', zero_array)  
-    b_orig = rgb_responses.get('B', zero_array)
+    # Stack into (n_wavelengths, 3) matrix, apply transform, unstack
+    stacked = np.column_stack([
+        rgb_responses.get('R', zero_array),
+        rgb_responses.get('G', zero_array),
+        rgb_responses.get('B', zero_array),
+    ])
+    mixed = stacked @ mixer_settings.to_matrix().T
     
-    # Apply mixing transformation
-    r_mixed = (r_orig * mixer_settings.red_r + 
-               g_orig * mixer_settings.red_g + 
-               b_orig * mixer_settings.red_b)
-    
-    g_mixed = (r_orig * mixer_settings.green_r + 
-               g_orig * mixer_settings.green_g + 
-               b_orig * mixer_settings.green_b)
-    
-    b_mixed = (r_orig * mixer_settings.blue_r + 
-               g_orig * mixer_settings.blue_g + 
-               b_orig * mixer_settings.blue_b)
-    
-    return {
-        'R': r_mixed,
-        'G': g_mixed, 
-        'B': b_mixed
-    }
+    return {'R': mixed[:, 0], 'G': mixed[:, 1], 'B': mixed[:, 2]}
 
 
 def apply_channel_mixing_to_colors(
@@ -110,16 +92,4 @@ def apply_channel_mixing_to_colors(
     return mixed_colors_flat.reshape(original_shape)
 
 
-def is_identity_matrix(mixer_settings: ChannelMixerSettings) -> bool:
-    """
-    Check if mixer settings represent identity transformation (no mixing).
-    
-    Args:
-        mixer_settings: Settings to check
-        
-    Returns:
-        True if settings represent identity matrix
-    """
-    matrix = mixer_settings.to_matrix()
-    identity = np.eye(3)
-    return np.allclose(matrix, identity, atol=1e-6)
+

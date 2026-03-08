@@ -1,107 +1,75 @@
 """
 UI utilities for FS FilterLab.
 
-Provides error handling, messaging, color utilities, and safe operation execution.
+Provides toast notifications, inline messages, color utilities,
+and reusable rendering helpers.
 """
-# Standard library imports
-import colorsys
 import re
-from typing import Dict, Any, Optional, List, Tuple, Union, TypeVar, Callable
+from typing import Dict, Optional
 
-# Third-party imports
-import streamlit as st
 import numpy as np
-import pandas as pd
+from nicegui import ui
 
-# Local imports
-from models.constants import UI_SECTIONS, ERROR_MESSAGE_TEMPLATES
-from models.core import TargetProfile
-from services.visualization import prepare_rgb_for_display
-
-T = TypeVar('T')
 
 # ============================================================================
-# ERROR HANDLING AND MESSAGING
+# MESSAGING — TOAST NOTIFICATIONS (for action feedback)
 # ============================================================================
 
-def show_error_message(message: str, stop_execution: bool = False) -> None:
-    """Display an error message."""
-    st.error(message)
-    if stop_execution:
-        st.stop()
+def show_error_message(message: str) -> None:
+    """Display an error notification (toast)."""
+    ui.notify(message, type="negative", position="top", close_button=True, timeout=8000)
 
 
 def show_warning_message(message: str) -> None:
-    """Display a warning message."""
-    st.warning(message)
+    """Display a warning notification (toast)."""
+    ui.notify(message, type="warning", position="top", close_button=True, timeout=5000)
 
 
 def show_info_message(message: str) -> None:
-    """Display an info message."""
-    st.info(message)
+    """Display an info notification (toast)."""
+    ui.notify(message, type="info", position="top", close_button=True, timeout=4000)
 
 
 def show_success_message(message: str) -> None:
-    """Display a success message."""
-    st.success(message)
+    """Display a success notification (toast)."""
+    ui.notify(message, type="positive", position="top", close_button=True, timeout=3000)
 
 
-def handle_error(message: str, severity: str = "error", stop_execution: bool = False) -> None:
-    """Display an error message with specified severity."""
+# ============================================================================
+# MESSAGING — INLINE (for page-content messages that should persist)
+# ============================================================================
+
+def inline_warning(message: str) -> None:
+    """Render an inline warning message that persists on the page."""
+    with ui.row().classes("w-full items-center gap-2 p-2 bg-yellow-50 rounded border border-yellow-300"):
+        ui.icon("warning").classes("text-yellow-600")
+        ui.label(message).classes("text-sm text-yellow-800")
+
+
+def inline_info(message: str) -> None:
+    """Render an inline info message that persists on the page."""
+    with ui.row().classes("w-full items-center gap-2 p-2 bg-blue-50 rounded border border-blue-200"):
+        ui.icon("info").classes("text-blue-600")
+        ui.label(message).classes("text-sm text-blue-800")
+
+
+def handle_error(message: str, severity: str = "error") -> None:
+    """Unified error display with severity routing."""
     if severity == "error":
-        show_error_message(message, stop_execution)
+        show_error_message(message)
     elif severity == "warning":
         show_warning_message(message)
     else:
         show_info_message(message)
 
 
-def try_operation(
-    operation: Callable[[], T], 
-    error_message: str, 
-    default_value: Optional[T] = None, 
-    severity: str = "error",
-    stop_on_error: bool = False
-) -> T:
+def try_operation(operation, error_message: str, default_value=None, severity: str = "error"):
     """Execute an operation with error handling."""
     try:
         return operation()
     except Exception as e:
-        handle_error(f"{error_message}: {str(e)}", severity, stop_on_error)
+        handle_error(f"{error_message}: {e}", severity)
         return default_value
-
-
-def format_error_message(template_key: str, **kwargs) -> str:
-    """
-    Format an error message using predefined templates.
-    
-    Args:
-        template_key: Key from ERROR_MESSAGE_TEMPLATES
-        **kwargs: Template parameters
-        
-    Returns:
-        Formatted error message string
-    """
-    if template_key not in ERROR_MESSAGE_TEMPLATES:
-        return f"Unknown error template: {template_key}"
-    
-    try:
-        return ERROR_MESSAGE_TEMPLATES[template_key].format(**kwargs)
-    except KeyError as e:
-        return f"Error formatting message template '{template_key}': missing parameter {e}"
-
-
-def show_template_error(template_key: str, severity: str = "error", **kwargs) -> None:
-    """
-    Display an error message using a predefined template.
-    
-    Args:
-        template_key: Key from ERROR_MESSAGE_TEMPLATES
-        severity: Message severity ('error', 'warning', 'info')
-        **kwargs: Template parameters
-    """
-    message = format_error_message(template_key, **kwargs)
-    handle_error(message, severity)
 
 
 # ============================================================================
@@ -109,186 +77,98 @@ def show_template_error(template_key: str, severity: str = "error", **kwargs) ->
 # ============================================================================
 
 def is_dark_color(hex_color: str) -> bool:
-    """
-    Check if a color is dark (for text contrast).
-    
-    Args:
-        hex_color: Hex color code
-        
-    Returns:
-        True if the color is dark
-    """
-    hex_color = hex_color.lstrip('#')
+    hex_color = hex_color.lstrip("#")
     r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
-    luminance = 0.2126*r + 0.7152*g + 0.0722*b
-    return luminance < 128
-
-
-# ============================================================================
-# COLOR PREVIEW UTILITIES
-# ============================================================================
-
-def reflector_preview(pixels: np.ndarray, reflector_names: Optional[List[str]] = None) -> None:
-    """
-    Display reflector color preview.
-    
-    Args:
-        pixels: Array of RGB pixel values, shape (n, m, 3)
-        reflector_names: List of reflector names (optional)
-    """
-    # Ensure pixels is a valid RGB array
-    if pixels.ndim != 3 or pixels.shape[2] != 3:
-        message = format_error_message('invalid_format', item='pixel array')
-        handle_error(message)
-        return
-    
-    # Display in the sidebar
-    st.sidebar.subheader(UI_SECTIONS['vegetation_preview'])
-    
-    # Use camera-realistic normalization with independent channel saturation
-    pixels_normalized = prepare_rgb_for_display(pixels, auto_exposure=True)
-    
-    # Display the image in the sidebar
-    st.sidebar.image(pixels_normalized, width=300, channels="RGB", output_format="PNG")
-
-
-def single_reflector_preview(
-    pixel_color: np.ndarray, 
-    reflector_name: str,
-    global_max: float = None
-) -> None:
-    """
-    Display single reflector color preview.
-    
-    Args:
-        pixel_color: Single RGB color as 1x1x3 array
-        reflector_name: Name of the reflector
-        global_max: Global maximum value for consistent scaling (optional)
-    """
-    # Ensure pixel_color is a valid RGB array
-    if pixel_color.ndim != 3 or pixel_color.shape[2] != 3:
-        message = format_error_message('invalid_format', item='pixel color')
-        handle_error(message)
-        return
-    
-    # Display in the sidebar
-    st.sidebar.subheader(UI_SECTIONS['surface_preview'])
-    
-    # Use camera-realistic normalization
-    
-    if global_max is not None and global_max > 0:
-        # Use consistent scaling with vegetation preview
-        # Apply the same exposure scaling, then camera-realistic saturation
-        pixel_normalized = prepare_rgb_for_display(
-            pixel_color, 
-            saturation_level=global_max, 
-            auto_exposure=False
-        )
-    else:
-        # Independent normalization when no global reference
-        pixel_normalized = prepare_rgb_for_display(pixel_color, auto_exposure=True)
-    
-    # Display the single color as a larger image
-    st.sidebar.image(pixel_normalized, width=200, channels="RGB", output_format="PNG")
-    st.sidebar.caption(f"Selected: {reflector_name}")
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128
 
 
 def is_valid_hex_color(hex_code: str) -> bool:
-    """
-    Check if a string is a valid hex color code.
-    
-    Args:
-        hex_code: String to check
-        
-    Returns:
-        True if the string is a valid hex color code
-    """
     return isinstance(hex_code, str) and bool(re.fullmatch(r"#([0-9a-fA-F]{6})", hex_code))
 
 
-# ============================================================================
-# COLOR SWATCH RENDERING
-# ============================================================================
-
-def render_color_swatch(
-    hex_color: str, 
-    size: int = 40, 
-    border: bool = True
-) -> None:
-    """
-    Render a simple color swatch square.
-    
-    Args:
-        hex_color: Hex color code (e.g., "#FF5500")
-        size: Size of the swatch in pixels (default 40)
-        border: Whether to add a border (default True)
-    """
-    border_style = "border: 1px solid #ccc;" if border else ""
-    st.markdown(f"""
-        <div style="
-            background-color: {hex_color};
-            width: {size}px;
-            height: {size}px;
-            border-radius: 4px;
-            {border_style}
-        "></div>
-    """, unsafe_allow_html=True)
-
-
-def render_color_swatch_from_rgb(
-    rgb_color: np.ndarray, 
-    size: int = 40, 
-    border: bool = True
-) -> None:
-    """
-    Render a color swatch from RGB values (0-1 scale).
-    
-    Args:
-        rgb_color: RGB array with values in 0-1 range
-        size: Size of the swatch in pixels (default 40)
-        border: Whether to add a border (default True)
-    """
-    if rgb_color is None:
-        st.markdown("—")
-        return
-    
-    hex_color = "#{:02x}{:02x}{:02x}".format(
-        int(np.clip(rgb_color[0], 0, 1) * 255),
-        int(np.clip(rgb_color[1], 0, 1) * 255),
-        int(np.clip(rgb_color[2], 0, 1) * 255)
+def rgb_to_hex(rgb: np.ndarray) -> str:
+    """Convert 0-1 scale RGB array to hex string."""
+    if rgb is None:
+        return "#808080"
+    return "#{:02x}{:02x}{:02x}".format(
+        int(np.clip(rgb[0], 0, 1) * 255),
+        int(np.clip(rgb[1], 0, 1) * 255),
+        int(np.clip(rgb[2], 0, 1) * 255),
     )
-    render_color_swatch(hex_color, size, border)
 
 
-def render_filter_card(
-    hex_color: str,
-    label: str,
-    text_color: Optional[str] = None
-) -> None:
+# ============================================================================
+# REFLECTOR METADATA FORMATTING
+# ============================================================================
+
+def format_reflector_metadata(
+    metadata: Dict[str, str],
+    api_fields: list,
+    fallback_fields: list,
+    relevant_meta_key: str,
+    max_parts: int = 3,
+) -> Optional[str]:
+    """Build a concise metadata summary string for a reflector.
+
+    Collects field values from *metadata* in priority order:
+    api_fields first, then columns listed in the relevant-metadata key
+    (or *fallback_fields* if none).  Returns at most *max_parts* items
+    joined by `` | ``, or ``None`` if nothing is available.
     """
-    Render a filter card with colored background and label.
-    
+    display_fields = list(api_fields)
+    rel_meta = metadata.get(relevant_meta_key, "")
+    if rel_meta:
+        display_fields.extend(c.strip() for c in rel_meta.split("|") if c.strip())
+    else:
+        display_fields.extend(fallback_fields)
+
+    seen: set = set()
+    parts: list = []
+    for field in display_fields:
+        if field in seen:
+            continue
+        seen.add(field)
+        v = metadata.get(field, "").strip()
+        if v:
+            parts.append(f"{field}: {v}")
+    return " | ".join(parts[:max_parts]) if parts else None
+
+
+# ============================================================================
+# COLOR SWATCH / CARD RENDERING
+# ============================================================================
+
+def render_filter_card(hex_color: str, label: str, text_color: Optional[str] = None) -> None:
+    text_color = text_color or ("#FFF" if is_dark_color(hex_color) else "#000")
+    ui.html(
+        f'<div style="background-color:{hex_color};color:{text_color};'
+        f'padding:8px 12px;border-radius:6px;font-weight:600;font-size:1rem;'
+        f'margin-bottom:2px;">{label}</div>'
+    )
+
+
+# ============================================================================
+# STATEFUL EXPANSION
+# ============================================================================
+
+def stateful_expansion(label: str, key: str, app_state, default_open: bool = False) -> ui.expansion:
+    """Create a ui.expansion that remembers its open/closed state across rebuilds.
+
+    Saves state directly to app_state.sidebar_expansions without triggering
+    a full UI refresh — toggling an expander causes no flicker or re-render.
+
     Args:
-        hex_color: Background hex color code
-        label: Text to display on the card
-        text_color: Text color (auto-detected if None)
+        label: Header text for the expansion panel.
+        key: Unique string key used to persist state in app_state.
+        app_state: StateManager instance.
+        default_open: Initial open state if never saved (default False).
     """
-    if text_color is None:
-        text_color = "#FFF" if is_dark_color(hex_color) else "#000"
-    
-    st.markdown(f"""
-        <div style="
-            background-color: {hex_color};
-            color: {text_color};
-            padding: 8px 12px;
-            border-radius: 6px;
-            font-weight: 600;
-            font-size: 1rem;
-            margin-bottom: 0;
-        ">
-            {label}
-        </div>
-    """, unsafe_allow_html=True)
+    is_open = app_state.sidebar_expansions.get(key, default_open)
 
+    def _save(e):
+        exps = dict(app_state.sidebar_expansions)
+        exps[key] = e.value
+        app_state.sidebar_expansions = exps
+        # Intentionally no on_change call — toggle doesn't need a full rebuild
 
-
+    return ui.expansion(label, value=is_open, on_value_change=_save).classes("w-full")

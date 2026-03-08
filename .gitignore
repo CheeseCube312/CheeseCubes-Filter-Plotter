@@ -1,6 +1,24 @@
+# Python
 .venv/
-.vscode/
 __pycache__/
-.gitignore
-output/
-cache/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Project-specific
+program/output/
+program/cache/
+program/data/  # Managed as git submodule - should not be tracked here
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db

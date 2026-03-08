@@ -35,7 +35,6 @@ import numpy as np
 
 # Standard wavelength grid for all spectral data interpolation
 INTERP_GRID = np.arange(300, 1101, 1)  # 300–1100 nm, step 1 nm (standard optical range)
-WAVELENGTH_RANGE = (300, 1100)  # Min and max wavelengths for the standard grid
 
 # Mathematical constants for numerical stability
 EPSILON = 1e-6  # Small value to prevent division by zero and log domain errors
@@ -57,13 +56,6 @@ OUTPUT_FOLDERS = {
     'reports': "program/output",  # Main output directory for generated reports
     'ecosis': "program/data/reflectors/Ecosis",  # ECOSIS import destination
     'filter_import': "program/data/filters_data"  # Filter import destination
-}
-
-# File extensions used throughout the application
-FILE_EXTENSIONS = {
-    'data': '.tsv',      # Tab-separated values for all spectral data
-    'image': '.png',     # Portable Network Graphics for chart exports
-    'export': '.tsv'     # Export format for processed data
 }
 
 # =============================================================================
@@ -145,18 +137,6 @@ TSV_ATTRIBUTION_FIELDS = [
     ('API URL', 'api_url'),
 ]
 # =============================================================================
-# VEGETATION PREVIEW CONFIGURATION
-# =============================================================================
-
-# Settings for the vegetation color preview functionality
-VEGETATION_PREVIEW = {
-    'required_count': 4,          # Number of default reflectors needed (2x2 grid)
-    'grid_size': (2, 2),          # Display grid dimensions
-    'default_prefix': 'Default ', # Prefix for IsDefault metadata values
-    'default_numbers': [1, 2, 3, 4]  # Required default numbers
-}
-
-# =============================================================================
 # SPECTRAL DATA PROCESSING CONSTANTS
 # =============================================================================
 
@@ -179,13 +159,6 @@ DEFAULT_HEX_COLOR = "#838383"                # Default filter color (neutral gra
 # Cache configuration
 CACHE_DIR = Path("program/cache")  # Directory for storing cached computation results
 
-# RGB channel configuration
-QE_COLORS = {
-    'R': 'red',      # Red channel display color
-    'G': 'green',    # Green channel display color  
-    'B': 'blue'      # Blue channel display color
-}
-
 # Default white balance multiplier values (unity gain)
 DEFAULT_WB_GAINS = {
     'R': 1.0,        # Red channel multiplier
@@ -193,31 +166,9 @@ DEFAULT_WB_GAINS = {
     'B': 1.0         # Blue channel multiplier
 }
 
-# Default channel visibility settings
-DEFAULT_RGB_VISIBILITY = {
-    'R': True,       # Show red channel by default
-    'G': True,       # Show green channel by default
-    'B': True        # Show blue channel by default
-}
-
 # =============================================================================
 # CHANNEL MIXER CONFIGURATION
 # =============================================================================
-
-# Default channel mixer settings (identity matrix = no color mixing)
-DEFAULT_CHANNEL_MIXER = {
-    # Red output channel: R_out = R*red_r + G*red_g + B*red_b
-    'red_r': 1.0, 'red_g': 0.0, 'red_b': 0.0,
-    
-    # Green output channel: G_out = R*green_r + G*green_g + B*green_b  
-    'green_r': 0.0, 'green_g': 1.0, 'green_b': 0.0,
-    
-    # Blue output channel: B_out = R*blue_r + G*blue_g + B*blue_b
-    'blue_r': 0.0, 'blue_g': 0.0, 'blue_b': 1.0,
-    
-    # Control flags
-    'enabled': False
-}
 
 # Channel mixer UI control settings
 CHANNEL_MIXER_RANGE = (-2.0, 2.0)  # Slider range for mixing coefficients
@@ -236,8 +187,12 @@ UI_BUTTONS = {
     'rebuild_cache': "Rebuild Cache",
     'csv_importers': "Import Data (CSV/ECOSIS)",
     'generate_full_report': "Generate Full Report",
-    'white_balance_from_surface': "WB from Surface",
-    'reset_white_balance': "Reset WB",
+    'download_report': "Download PNG Report",
+    'import_filter': "Import Filter",
+    'import_illuminant': "Import Illuminant",
+    'import_camera_qe': "Import Camera QE",
+    'import_single_spectrum': "Import Single Spectrum",
+    'import_ecosis_file': "Import ECOSIS File",
 }
 
 # Main section and panel titles
@@ -247,15 +202,19 @@ UI_SECTIONS = {
     'display_visualization': "Display & Visualization",
     'export_reports': "Export & Reports",
     'data_management': "Data Management",
-    'vegetation_preview': "Vegetation Color Preview",
-    'surface_preview': "Surface Preview",
     'show_advanced_search': "Show Advanced Filter Search",
     'show_reflector_search': "Show Reflector Search",
     'show_channel_mixer': "Show Channel Mixer",
     'sensor_response_channels': "Sensor-Weighted Response Channels",
     'display_options': "Display Options",
     'reflectance_illuminant_curves': "Show Reflectance and Illuminant Curves",
-    'default_reflector_list': "Surface Color Preview"
+    'default_reflector_list': "Surface Color Preview",
+    'advanced_filter_search': "Advanced Filter Search",
+    'advanced_reflector_search': "Advanced Reflector Search",
+    'import_data': "Import Data",
+    'ecosis_import': "ECOSIS Import",
+    'import_reflectance_absorption': "Import Reflectance/Absorption Data",
+    'column_selection': "Column Selection:",
 }
 
 # Form field labels and control text
@@ -267,46 +226,46 @@ UI_LABELS = {
     'surface_reflectance': "Surface Reflectance Spectrum",
     'set_filter_counts': "Set Filter Stack Counts",
     'stop_view_toggle': "Show stop-view (logarithmic)",
-    'apply_white_balance': "Apply White Balance to Response"
+    'apply_white_balance': "Apply White Balance to Response",
+    'search_by_manufacturer': "Search by manufacturer, color, or spectral transmittance.",
+    'filter_reflectors': "Filter reflectors by metadata, then add to your default list.",
+    'upload_csv_wl_trans': "Upload CSV (Wavelength, Transmittance)",
+    'upload_csv_wl_power': "Upload CSV (Wavelength, Power)",
+    'upload_csv_wl_rgb': "Upload CSV (Wavelength, R, G, B)",
+    'upload_csv': "Upload CSV",
+    'upload_ecosis_csv': "Upload ECOSIS CSV",
+    'ecosis_api_url': "ECOSIS API URL (optional, recommended)",
+    'choose_name_column': "Choose column for spectrum names",
+    'relevant_metadata': "Relevant metadata for Surface Color Preview",
+    'upload_file_first': "Please upload a file first",
 }
 
 # User feedback messages
 UI_INFO_MESSAGES = {
     'no_target_overlap': "No valid overlap with target for deviation calculation.",
-    'leaf_data_required': "Leaf reflectance data requires files named: Leaf 1, Leaf 2, Leaf 3, Leaf 4",
     'no_illuminant': "No illuminant loaded.",
     'no_reflectors': "No reflectance spectra found.",
     'qe_illuminant_required': "Select a QE & illuminant profile to compute white balance.",
-    'color_compute_failed': "Unable to compute color for selected surface"
+    'color_compute_failed': "Unable to compute color for selected surface",
+    'select_qe_prompt': "Select a QE profile in Analysis Setup (sidebar) to see sensor response and surface color analysis."
 }
 
 UI_WARNING_MESSAGES = {
     'no_illuminants': "No illuminants found.",
     'invalid_hex_colors': "Found {count} filters with invalid hex color codes:",
     'incomplete_reflector_data': "Some reflector data appears incomplete. Check data files.",
-    'vegetation_preview_required': (
-        "Vegetation Color Preview requires 4 reflector files with IsDefault metadata:\n"
-        "- File with #IsDefault\tDefault 1\n"
-        "- File with #IsDefault\tDefault 2\n"
-        "- File with #IsDefault\tDefault 3\n"
-        "- File with #IsDefault\tDefault 4\n"
-        "Make sure the TSV files have IsDefault metadata with these exact values."
-    )
 }
 
 UI_SUCCESS_MESSAGES = {
     'report_generated': "Report generated successfully!",
     'cache_rebuilt': "Cache rebuilt successfully! Reloading application...",
-    # Additional action success messages
-    'full_report_generated': "Full report generated. Files saved to output folder.",
-    'tsv_generated': "TSV generated and ready for download!"
+    'full_report_generated': "Full report generated. Files saved to output folder."
 }
 
 # Operation error messages for try_operation calls
 UI_OPERATION_ERRORS = {
     'report_generation': "Report generation failed",
-    'full_report_generation': "Full report generation failed", 
-    'tsv_generation': "TSV generation failed",
+    'full_report_generation': "Full report generation failed",
     'cache_rebuild': "Cache rebuild failed"
 }
 
@@ -314,7 +273,6 @@ UI_OPERATION_ERRORS = {
 ACTION_TYPES = {
     'generate_report': 'generate_report',
     'generate_full_report': 'generate_full_report',
-    'export_tsv': 'export_tsv',
     'rebuild_cache': 'rebuild_cache'
 }
 
@@ -339,7 +297,6 @@ UI_HELP_TEXT = {
 UI_CHART_TITLES = {
     'combined_filter_response': "Combined Filter Response",
     'sensor_weighted_response': "Sensor-Weighted Response (QE × Transmission)",
-    'leaf_reflectance': "Leaf Reflectance Spectra",
     'qe_profile': "Sensor Quantum Efficiency (QE)",
     'illuminant_spectrum': "Illuminant Spectrum"
 }
@@ -356,18 +313,36 @@ CHART_HEIGHTS = {
     'sparkline': 150             # Compact inline sparklines
 }
 
+# Sparkline plot configuration
+SPARKLINE_CONFIG = {
+    'default_width': 300,        # Default sparkline width in pixels
+    'margins': {'l': 40, 'r': 10, 't': 10, 'b': 30},  # Chart margins (left, right, top, bottom)
+    'font_sizes': {
+        'axis_title': 10,        # Axis label font size
+        'tick_label': 8,         # Tick label font size
+    },
+    'wavelength_tick_intervals': {  # Wavelength axis tick spacing by range
+        'large': {'threshold': 500, 'interval': 200},   # >500nm range
+        'medium': {'threshold': 200, 'interval': 100},  # 200-500nm range  
+        'small': {'threshold': 0, 'interval': 50},      # <200nm range
+    }
+}
+
 # Line rendering styles
 CHART_LINE_STYLES = {
+    # Plotly line-width presets (keyed by role)
     'default': {'width': 2},               # Standard line width
     'thick': {'width': 3},                 # Emphasized lines (combined filters)
     'sparkline': {'width': 1.5},           # Sparkline thickness
-    'standard_width': 2,                   # Standard matplotlib line width
-    'extrapolated_style': '--',            # Extrapolated data line style (dashed)
-    'extrapolated_alpha': 0.7,             # Extrapolated data transparency
-    'extrapolated': {                      # Styling for extrapolated data regions
+    # Matplotlib line-width presets
+    'matplotlib': {'width': 2},            # Standard matplotlib line width
+    # Extrapolated-region styling
+    'extrapolated': {
+        'width': 2,
+        'style': '--',                     # Matplotlib dash style
         'alpha': 0.7,
-        'dash': 'dot'
-    }
+        'dash': 'dot',                     # Plotly dash style
+    },
 }
 
 # Color scheme for different chart elements
@@ -442,5 +417,14 @@ MPL_STYLE_CONFIG = {
     "legend.fontsize": 8,
 }
 
-# Note: Data classes (ReportConfig, FilterData, ComputationFunctions, SensorData, ChartConfig)
-# have been moved to models/core.py for proper separation of concerns.
+# Import dialog tab labels and options
+IMPORT_TABS = {
+    'filters': "Filters",
+    'illuminants': "Illuminants",
+    'camera_qe': "Camera QE",
+    'reflectance_ecosis': "Reflectance/ECOSIS",
+}
+
+IMPORT_DATA_TYPES = ["Reflectance", "Absorption"]
+IMPORT_CATEGORIES = ["Plant", "Other"]
+IMPORT_ECOSIS_MODES = ["Single Spectrum CSV", "ECOSIS Multi-Spectrum CSV"]

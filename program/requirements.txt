@@ -1,4 +1,4 @@
-streamlit
+nicegui
 pandas
 numpy
 plotly

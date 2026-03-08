@@ -1,201 +1,88 @@
 """
-Channel Mixer UI Components for FS FilterLab.
+Channel Mixer panel for FS FilterLab.
 
-This module provides the user interface for channel mixing functionality,
-including the main control panel with sliders for manual channel mixing control.
-The UI provides a 3x3 matrix of sliders for intuitive channel mixing control.
+3×3 slider grid for RGB channel mixing.
 """
-import streamlit as st
-from typing import Dict, Any, Optional
+from nicegui import ui
+from typing import Callable, Optional
 
+from models.constants import CHANNEL_MIXER_RANGE, CHANNEL_MIXER_STEP
 from models.core import ChannelMixerSettings
-from models.constants import CHANNEL_MIXER_RANGE, CHANNEL_MIXER_STEP, DEFAULT_CHANNEL_MIXER
-from services.channel_mixer import is_identity_matrix
 
 
-def _reset_mixer_to_identity(mixer_settings: ChannelMixerSettings) -> None:
-    """
-    Reset channel mixer settings to identity matrix (no mixing).
-    
+def render_channel_mixer_panel(
+    app_state,
+    on_change: Optional[Callable] = None,
+) -> None:
+    """Render the channel mixer 3×3 slider grid inside a card.
+
     Args:
-        mixer_settings: ChannelMixerSettings object to reset
+        app_state: NiceGUIStateManager instance.
+        on_change: Optional callback fired whenever any slider moves.
     """
-    # Reset object values to identity matrix
-    mixer_settings.red_r = DEFAULT_CHANNEL_MIXER['red_r']
-    mixer_settings.red_g = DEFAULT_CHANNEL_MIXER['red_g']
-    mixer_settings.red_b = DEFAULT_CHANNEL_MIXER['red_b']
-    mixer_settings.green_r = DEFAULT_CHANNEL_MIXER['green_r']
-    mixer_settings.green_g = DEFAULT_CHANNEL_MIXER['green_g']
-    mixer_settings.green_b = DEFAULT_CHANNEL_MIXER['green_b']
-    mixer_settings.blue_r = DEFAULT_CHANNEL_MIXER['blue_r']
-    mixer_settings.blue_g = DEFAULT_CHANNEL_MIXER['blue_g']
-    mixer_settings.blue_b = DEFAULT_CHANNEL_MIXER['blue_b']
-    
-    # Update session state to match (this is safe because we're setting the values, not conflicts)
-    st.session_state.red_r = DEFAULT_CHANNEL_MIXER['red_r']
-    st.session_state.red_g = DEFAULT_CHANNEL_MIXER['red_g']
-    st.session_state.red_b = DEFAULT_CHANNEL_MIXER['red_b']
-    st.session_state.green_r = DEFAULT_CHANNEL_MIXER['green_r']
-    st.session_state.green_g = DEFAULT_CHANNEL_MIXER['green_g']
-    st.session_state.green_b = DEFAULT_CHANNEL_MIXER['green_b']
-    st.session_state.blue_r = DEFAULT_CHANNEL_MIXER['blue_r']
-    st.session_state.blue_g = DEFAULT_CHANNEL_MIXER['blue_g']
-    st.session_state.blue_b = DEFAULT_CHANNEL_MIXER['blue_b']
+    min_val, max_val = CHANNEL_MIXER_RANGE
 
+    def _make_setter(attr: str):
+        """Return a callback that writes one mixer attribute to state."""
+        def _set(e):
+            mixer = app_state.channel_mixer
+            setattr(mixer, attr, e.value)
+            app_state.channel_mixer = mixer
+            if on_change:
+                on_change()
+        return _set
 
-def render_channel_mixer_panel(mixer_settings: ChannelMixerSettings) -> ChannelMixerSettings:
-    """
-    Render the main channel mixer control panel.
-    
-    Creates a clean, compact interface with:
-    - 3x3 matrix of channel mixing sliders
-    - Reset button
-    - Real-time preview of changes
-    
-    Args:
-        mixer_settings: Current channel mixer settings
-        
-    Returns:
-        Updated ChannelMixerSettings object with user modifications
-    """
-    # Header with reset button
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.subheader("Channel Mixer")
-    with col2:
-        if st.button("Reset", help="Reset to no mixing"):
-            _reset_mixer_to_identity(mixer_settings)
-            st.rerun()
-    
-    # Enable by default when panel is shown
-    mixer_settings.enabled = True
-    
-    # Compact slider grid
-    _render_compact_sliders(mixer_settings)
-    
-    return mixer_settings
+    def _reset():
+        app_state.channel_mixer = ChannelMixerSettings(enabled=app_state.show_channel_mixer)
+        # Refresh the UI — replace the panel contents
+        panel_container.clear()
+        with panel_container:
+            _build_sliders()
+        if on_change:
+            on_change()
 
+    def _build_sliders():
+        mixer = app_state.channel_mixer
 
-def _render_compact_sliders(mixer_settings: ChannelMixerSettings) -> None:
-    """
-    Render a clean, compact 3x3 grid of channel mixing sliders.
-    
-    Note: The StateManager now automatically builds channel mixer objects from
-    session state, so we no longer need to manually sync values. This eliminates
-    timing issues and ensures sliders are always immediately reflected in calculations.
-    
-    Args:
-        mixer_settings: Channel mixer settings (used for initialization only)
-    """
-    # Initialize session state if not present (using mixer_settings for defaults)
-    if "red_r" not in st.session_state:
-        st.session_state.red_r = mixer_settings.red_r
-    if "red_g" not in st.session_state:
-        st.session_state.red_g = mixer_settings.red_g
-    if "red_b" not in st.session_state:
-        st.session_state.red_b = mixer_settings.red_b
-    if "green_r" not in st.session_state:
-        st.session_state.green_r = mixer_settings.green_r
-    if "green_g" not in st.session_state:
-        st.session_state.green_g = mixer_settings.green_g
-    if "green_b" not in st.session_state:
-        st.session_state.green_b = mixer_settings.green_b
-    if "blue_r" not in st.session_state:
-        st.session_state.blue_r = mixer_settings.blue_r
-    if "blue_g" not in st.session_state:
-        st.session_state.blue_g = mixer_settings.blue_g
-    if "blue_b" not in st.session_state:
-        st.session_state.blue_b = mixer_settings.blue_b
-    
-    # Column headers first for better clarity
-    col1, col2, col3, col4 = st.columns([1, 2, 2, 2])
-    with col1:
-        st.markdown("**Output**")
-    with col2:
-        st.markdown("*From Red*")
-    with col3:
-        st.markdown("*From Green*") 
-    with col4:
-        st.markdown("*From Blue*")
-    
-    # Red output row
-    col1, col2, col3, col4 = st.columns([1, 2, 2, 2])
-    with col1:
-        st.markdown("**Red**")
-    with col2:
-        st.slider(
-            "Red→Red", *CHANNEL_MIXER_RANGE, step=CHANNEL_MIXER_STEP,
-            key="red_r", label_visibility="collapsed"
-        )
-    with col3:
-        st.slider(
-            "Green→Red", *CHANNEL_MIXER_RANGE, step=CHANNEL_MIXER_STEP,
-            key="red_g", label_visibility="collapsed"
-        )
-    with col4:
-        st.slider(
-            "Blue→Red", *CHANNEL_MIXER_RANGE, step=CHANNEL_MIXER_STEP,
-            key="red_b", label_visibility="collapsed"
-        )
-    
-    # Green output row
-    col1, col2, col3, col4 = st.columns([1, 2, 2, 2])
-    with col1:
-        st.markdown("**Green**")
-    with col2:
-        st.slider(
-            "Red→Green", *CHANNEL_MIXER_RANGE, step=CHANNEL_MIXER_STEP,
-            key="green_r", label_visibility="collapsed"
-        )
-    with col3:
-        st.slider(
-            "Green→Green", *CHANNEL_MIXER_RANGE, step=CHANNEL_MIXER_STEP,
-            key="green_g", label_visibility="collapsed"
-        )
-    with col4:
-        st.slider(
-            "Blue→Green", *CHANNEL_MIXER_RANGE, step=CHANNEL_MIXER_STEP,
-            key="green_b", label_visibility="collapsed"
-        )
-    
-    # Blue output row
-    col1, col2, col3, col4 = st.columns([1, 2, 2, 2])
-    with col1:
-        st.markdown("**Blue**")
-    with col2:
-        st.slider(
-            "Red→Blue", *CHANNEL_MIXER_RANGE, step=CHANNEL_MIXER_STEP,
-            key="blue_r", label_visibility="collapsed"
-        )
-    with col3:
-        st.slider(
-            "Green→Blue", *CHANNEL_MIXER_RANGE, step=CHANNEL_MIXER_STEP,
-            key="blue_g", label_visibility="collapsed"
-        )
-    with col4:
-        st.slider(
-            "Blue→Blue", *CHANNEL_MIXER_RANGE, step=CHANNEL_MIXER_STEP,
-            key="blue_b", label_visibility="collapsed"
-        )
-    
-    # Note: No manual sync needed - StateManager automatically builds mixer from session state
+        # Header row
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("Channel Mixer").classes("text-lg font-bold")
+            ui.button("Reset", on_click=_reset).props("dense flat size=sm")
 
+        # Column headers
+        with ui.grid(columns=4).classes("w-full gap-1"):
+            ui.label("Output").classes("font-bold text-sm")
+            ui.label("From Red").classes("text-sm italic text-center")
+            ui.label("From Green").classes("text-sm italic text-center")
+            ui.label("From Blue").classes("text-sm italic text-center")
 
+            # Red output row
+            ui.label("Red").classes("font-bold text-sm")
+            for attr in ("red_r", "red_g", "red_b"):
+                ui.slider(
+                    min=min_val, max=max_val, step=CHANNEL_MIXER_STEP,
+                    value=getattr(mixer, attr),
+                    on_change=_make_setter(attr),
+                ).props("dense").classes("w-full")
 
-def render_compact_channel_mixer_status(mixer_settings: ChannelMixerSettings) -> None:
-    """
-    Render compact status display for when channel mixer is not expanded.
-    
-    Args:
-        mixer_settings: Current mixer settings
-    """
-    if not mixer_settings.enabled:
-        st.markdown("*Channel Mixer: Disabled*")
-        return
-        
-    if is_identity_matrix(mixer_settings):
-        st.markdown("*Channel Mixer: Identity (no mixing)*")
-    else:
-        st.markdown("*Channel Mixer: Custom*")
+            # Green output row
+            ui.label("Green").classes("font-bold text-sm")
+            for attr in ("green_r", "green_g", "green_b"):
+                ui.slider(
+                    min=min_val, max=max_val, step=CHANNEL_MIXER_STEP,
+                    value=getattr(mixer, attr),
+                    on_change=_make_setter(attr),
+                ).props("dense").classes("w-full")
 
+            # Blue output row
+            ui.label("Blue").classes("font-bold text-sm")
+            for attr in ("blue_r", "blue_g", "blue_b"):
+                ui.slider(
+                    min=min_val, max=max_val, step=CHANNEL_MIXER_STEP,
+                    value=getattr(mixer, attr),
+                    on_change=_make_setter(attr),
+                ).props("dense").classes("w-full")
 
+    panel_container = ui.column().classes("w-full")
+    with panel_container:
+        _build_sliders()

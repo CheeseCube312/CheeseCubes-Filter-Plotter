@@ -25,14 +25,13 @@ error handling in the UI layer.
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import os
 from scipy.interpolate import interp1d
 from typing import Tuple, Dict, Any, List, Optional
 import requests
 import json
 import logging
 import re
-from models.constants import INTERP_GRID, DATA_FOLDERS, METADATA_FIELDS, OUTPUT_FOLDERS, TSV_ATTRIBUTION_FIELDS
+from models.constants import INTERP_GRID, DATA_FOLDERS, OUTPUT_FOLDERS, TSV_ATTRIBUTION_FIELDS
 
 # Configure logging for debugging import issues
 logger = logging.getLogger(__name__)
@@ -41,15 +40,15 @@ logger = logging.getLogger(__name__)
 # COMMON UTILITIES
 # ============================================================================
 
-def safe_float(val):
+def _safe_float(val):
     """Convert a value to float safely, handling various formats."""
     try:
         return float(str(val).replace(',', '.').strip())
-    except Exception:
+    except (ValueError, TypeError):
         return np.nan
 
 
-def validate_wavelength_data(wavelengths, values, value_type="spectral values"):
+def _validate_wavelength_data(wavelengths, values, value_type="spectral values"):
     """
     Common validation for wavelength and spectral data.
     
@@ -84,7 +83,7 @@ def validate_wavelength_data(wavelengths, values, value_type="spectral values"):
 
 
 
-def safe_file_save(df: pd.DataFrame, file_path: Path, data_type: str) -> Tuple[bool, str]:
+def _safe_file_save(df: pd.DataFrame, file_path: Path, data_type: str) -> Tuple[bool, str]:
     """
     Safely save a DataFrame to a file with error handling.
     
@@ -112,7 +111,7 @@ def safe_file_save(df: pd.DataFrame, file_path: Path, data_type: str) -> Tuple[b
         return False, f"Failed to save file to {file_path}: {str(e)}"
 
 
-def parse_csv(file, separator=';', fallback_separator=','):
+def _parse_csv(file, separator=';', fallback_separator=','):
     """Parse a CSV file with auto-detection of separator and better error handling."""
     try:
         # Try primary separator first
@@ -132,10 +131,10 @@ def parse_csv(file, separator=';', fallback_separator=','):
         
         # Convert to float with better error reporting
         try:
-            raw_data = raw_data.map(safe_float)
+            raw_data = raw_data.map(_safe_float)
         except AttributeError:
             # Fallback for older pandas versions
-            raw_data = raw_data.applymap(safe_float)
+            raw_data = raw_data.applymap(_safe_float)
         
         # Check for too many NaN values
         nan_count = raw_data.isna().sum().sum()
@@ -153,7 +152,7 @@ def parse_csv(file, separator=';', fallback_separator=','):
         raise ValueError(f"Failed to read CSV file: {str(e)}")
 
 
-def get_wavelength_range(wavelengths, extrap_lower=False, extrap_upper=False):
+def _get_wavelength_range(wavelengths, extrap_lower=False, extrap_upper=False):
     """Determine the wavelength range based on data and extrapolation settings."""
     base_min = int(np.ceil(wavelengths.min() / 5.0)) * 5
     base_max = int(np.floor(wavelengths.max() / 5.0)) * 5
@@ -170,7 +169,7 @@ def get_wavelength_range(wavelengths, extrap_lower=False, extrap_upper=False):
     return min_wl, max_wl
 
 
-def interpolate_spectrum(wavelengths, values, target_wavelengths, extrap_lower=False, extrap_upper=False):
+def _interpolate_spectrum(wavelengths, values, target_wavelengths, extrap_lower=False, extrap_upper=False):
     """Interpolate spectral data to a target wavelength range."""
     interpolator = interp1d(wavelengths, values, kind='linear', bounds_error=False, fill_value=np.nan)
     interpolated = interpolator(target_wavelengths)
@@ -186,7 +185,7 @@ def interpolate_spectrum(wavelengths, values, target_wavelengths, extrap_lower=F
     return np.clip(np.round(interpolated, 3), 0.0, None)
 
 
-def sanitize_filename(name):
+def _sanitize_filename(name):
     """Convert a string to a valid filename."""
     return ''.join(c for c in name if c.isalnum() or c in (' ', '_')).rstrip().replace(' ', '_')
 
@@ -199,7 +198,7 @@ def _get_api_field(data: Dict, key: str, join_list: bool = True) -> str:
     return str(value) if value else ''
 
 
-def fetch_ecosis_api_metadata(api_url: str) -> Tuple[bool, Optional[Dict[str, Any]], str]:
+def _fetch_ecosis_api_metadata(api_url: str) -> Tuple[bool, Optional[Dict[str, Any]], str]:
     """
     Fetch metadata from ECOSIS API endpoint.
     
@@ -210,7 +209,7 @@ def fetch_ecosis_api_metadata(api_url: str) -> Tuple[bool, Optional[Dict[str, An
         Tuple of (success, metadata_dict, error_message)
     """
     try:
-        logger.info(f"Fetching ECOSIS API metadata from: {api_url}")
+        logger.info("Fetching ECOSIS API metadata from: %s", api_url)
         response = requests.get(api_url, timeout=30)
         response.raise_for_status()
         
@@ -238,11 +237,11 @@ def fetch_ecosis_api_metadata(api_url: str) -> Tuple[bool, Optional[Dict[str, An
     except json.JSONDecodeError:
         return False, None, "Invalid JSON response from API"
     except Exception as e:
-        logger.error(f"Unexpected error fetching ECOSIS metadata: {e}")
+        logger.error("Unexpected error fetching ECOSIS metadata: %s", e)
         return False, None, f"Unexpected error: {str(e)}"
 
 
-def extract_attribution_info(api_metadata: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_attribution_info(api_metadata: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract key attribution and metadata information from ECOSIS API response.
     
@@ -386,16 +385,16 @@ def import_ecosis_csv(file_path: str, output_dir: str, api_url: Optional[str] = 
         api_attribution = {}
         
         if api_url:
-            success, api_metadata, error_msg = fetch_ecosis_api_metadata(api_url)
+            success, api_metadata, error_msg = _fetch_ecosis_api_metadata(api_url)
             if success and api_metadata:
-                api_attribution = extract_attribution_info(api_metadata)
-                logger.info(f"Fetched API metadata with {len(api_attribution)} attribution fields")
+                api_attribution = _extract_attribution_info(api_metadata)
+                logger.info("Fetched API metadata with %d attribution fields", len(api_attribution))
             else:
-                logger.warning(f"Failed to fetch API metadata: {error_msg}")
+                logger.warning("Failed to fetch API metadata: %s", error_msg)
                 # Continue without API metadata
         
         # Always add source file and API URL to attribution (even if API fetch failed)
-        source_filename = os.path.basename(file_path)
+        source_filename = Path(file_path).name
         api_attribution['source_csv_file'] = source_filename
         if api_url:
             api_attribution['api_url'] = api_url
@@ -470,15 +469,15 @@ def import_ecosis_csv(file_path: str, output_dir: str, api_url: Optional[str] = 
                 # Only include data points with valid values
                 if pd.notna(value) and value != '':
                     try:
-                        float_val = safe_float(value)
+                        float_val = _safe_float(value)
                         if not np.isnan(float_val):
                             spectral_wavelengths.append(wavelength)
                             spectral_values.append(float_val)
-                    except:
+                    except (ValueError, TypeError):
                         continue  # Skip invalid values
             
             if len(spectral_wavelengths) < 5:
-                logger.warning(f"Skipping sample {sample_name} - insufficient valid data points ({len(spectral_wavelengths)})")
+                logger.warning("Skipping sample %s - insufficient valid data points (%d)", sample_name, len(spectral_wavelengths))
                 continue
             
             spectral_wavelengths = np.array(spectral_wavelengths)
@@ -489,7 +488,7 @@ def import_ecosis_csv(file_path: str, output_dir: str, api_url: Optional[str] = 
             mask = (spectral_wavelengths >= wl_min) & (spectral_wavelengths <= wl_max)
             
             if np.sum(mask) < 5:
-                logger.warning(f"Skipping sample {sample_name} - insufficient data in {wl_min}-{wl_max}nm range")
+                logger.warning("Skipping sample %s - insufficient data in %s-%snm range", sample_name, wl_min, wl_max)
                 continue
                 
             filtered_wavelengths = spectral_wavelengths[mask]
@@ -546,7 +545,7 @@ def import_ecosis_csv(file_path: str, output_dir: str, api_url: Optional[str] = 
             
             # Save as TSV file  
             filename = f"{sample_name}_{index+1}.tsv"  # Add index to avoid duplicates
-            filepath = os.path.join(output_dir, filename)
+            filepath = Path(output_dir) / filename
             
             with open(filepath, 'w') as f:
                 f.write('\n'.join(rows))
@@ -555,10 +554,10 @@ def import_ecosis_csv(file_path: str, output_dir: str, api_url: Optional[str] = 
             
         # Save complete API attribution information to a separate JSON file
         if api_attribution:
-            attribution_file = os.path.join(output_dir, "dataset_attribution.json")
+            attribution_file = Path(output_dir) / "dataset_attribution.json"
             with open(attribution_file, 'w', encoding='utf-8') as f:
                 json.dump(api_attribution, f, indent=2, ensure_ascii=False)
-            logger.info(f"Complete attribution information saved to {attribution_file}")
+            logger.info("Complete attribution information saved to %s", attribution_file)
             
         # Log summary of what was processed
         attribution_info = ""
@@ -567,14 +566,14 @@ def import_ecosis_csv(file_path: str, output_dir: str, api_url: Optional[str] = 
             title = api_attribution.get('package_title', 'Unknown')
             attribution_info = f" with attribution to {org} - {title}"
         
-        logger.info(f"Successfully processed {len(created_files)} ECOSIS samples{attribution_info}")
+        logger.info("Successfully processed %d ECOSIS samples%s", len(created_files), attribution_info)
         return created_files
         
     except Exception as e:
         raise ValueError(f"Error importing ECOSIS CSV: {str(e)}")
 
 
-def get_extrapolation_suffix(extrap_lower, extrap_upper):
+def _get_extrapolation_suffix(extrap_lower, extrap_upper):
     """Get a standardized suffix for extrapolated files."""
     suffix_parts = []
     if extrap_lower: suffix_parts.append("300")
@@ -613,7 +612,7 @@ def import_filter_from_csv(uploaded_file, meta, extrap_lower, extrap_upper):
         
         # Parse the CSV with detailed error handling
         try:
-            raw_data = parse_csv(uploaded_file)
+            raw_data = _parse_csv(uploaded_file)
         except ValueError as e:
             return False, f"CSV parsing failed: {str(e)}"
             
@@ -621,7 +620,7 @@ def import_filter_from_csv(uploaded_file, meta, extrap_lower, extrap_upper):
         transmissions = raw_data.iloc[:, 1].dropna().values
 
         # Validate wavelength data using common utility
-        is_valid, error_msg = validate_wavelength_data(wavelengths, transmissions, "transmission")
+        is_valid, error_msg = _validate_wavelength_data(wavelengths, transmissions, "transmission")
         if not is_valid:
             return False, error_msg
         
@@ -638,11 +637,11 @@ def import_filter_from_csv(uploaded_file, meta, extrap_lower, extrap_upper):
         transmissions = transmissions[sort_idx]
 
         # Determine wavelength range
-        min_wl, max_wl = get_wavelength_range(wavelengths, extrap_lower, extrap_upper)
+        min_wl, max_wl = _get_wavelength_range(wavelengths, extrap_lower, extrap_upper)
         new_wavelengths = np.arange(min_wl, max_wl + 1, 1)
         
         # Interpolate to the new wavelength grid
-        interpolated = interpolate_spectrum(
+        interpolated = _interpolate_spectrum(
             wavelengths, transmissions, new_wavelengths, 
             extrap_lower, extrap_upper
         )
@@ -659,28 +658,22 @@ def import_filter_from_csv(uploaded_file, meta, extrap_lower, extrap_upper):
 
         # Generate filename and save
         base = f"{meta['manufacturer']}_{meta['filter_number']}_{meta['filter_name']}"
-        sanitized = sanitize_filename(base)
-        suffix = get_extrapolation_suffix(extrap_lower, extrap_upper)
+        sanitized = _sanitize_filename(base)
+        suffix = _get_extrapolation_suffix(extrap_lower, extrap_upper)
         filename = f"{sanitized}{suffix}.tsv"
         
-        out_dir = os.path.join(OUTPUT_FOLDERS['filter_import'], meta["manufacturer"])
-        os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, filename)
+        out_dir = Path(OUTPUT_FOLDERS['filter_import']) / meta["manufacturer"]
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / filename
         
-        # Save the file
-        try:
-            output_df.to_csv(out_path, sep='\t', index=False)
-        except Exception as e:
-            return False, f"Failed to save file to {out_path}: {str(e)}"
-
-        return True, f"Filter data saved successfully to {out_path}"
+        return _safe_file_save(output_df, out_path, "Filter")
         
     except ValueError as e:
         # These are validation errors we want to show to the user
         return False, str(e)
     except Exception as e:
         # Unexpected errors - log them for debugging
-        logger.exception(f"Unexpected error in filter import: {str(e)}")
+        logger.exception("Unexpected error in filter import: %s", e)
         return False, f"Unexpected error during import: {str(e)}. Please check the file format and try again."
 
 # ============================================================================
@@ -711,7 +704,7 @@ def import_illuminant_from_csv(uploaded_file, description):
 
         # Parse CSV data with error handling
         try:
-            raw_data = parse_csv(uploaded_file)
+            raw_data = _parse_csv(uploaded_file)
         except ValueError as e:
             return False, f"CSV parsing failed: {str(e)}"
             
@@ -719,7 +712,7 @@ def import_illuminant_from_csv(uploaded_file, description):
         intensity = raw_data.iloc[:, 1].dropna().values
         
         # Validate wavelength data using common utility
-        is_valid, error_msg = validate_wavelength_data(wavelengths, intensity, "intensity")
+        is_valid, error_msg = _validate_wavelength_data(wavelengths, intensity, "intensity")
         if not is_valid:
             return False, error_msg
         
@@ -727,9 +720,8 @@ def import_illuminant_from_csv(uploaded_file, description):
         if intensity.min() < 0:
             return False, f"Intensity values cannot be negative (min: {intensity.min():.2f})."
 
-        # Target wavelength range: 300–1100 nm
-        full_range = np.arange(300, 1101, 1)
-        intensity_interp = np.interp(full_range, wavelengths, intensity, left=0, right=0)
+        # Interpolate to standard grid
+        intensity_interp = np.interp(INTERP_GRID, wavelengths, intensity, left=0, right=0)
 
         # Normalize to 0–100 scale
         max_val = np.max(intensity_interp)
@@ -740,29 +732,23 @@ def import_illuminant_from_csv(uploaded_file, description):
 
         # Create output DataFrame
         df_out = pd.DataFrame({
-            "Wavelength (nm)": full_range,
+            "Wavelength (nm)": INTERP_GRID,
             "Relative Power": intensity_rel,
             "Description": description
         })
 
         # Save file
-        filename = sanitize_filename(f"illuminant_{description}") + ".tsv"
+        filename = _sanitize_filename(f"illuminant_{description}") + ".tsv"
         out_path = out_dir / filename
         
-        # Save the file
-        try:
-            df_out.to_csv(out_path, sep="\t", index=False)
-        except Exception as e:
-            return False, f"Failed to save file to {out_path}: {str(e)}"
-
-        return True, f"Illuminant data saved successfully to {out_path}"
+        return _safe_file_save(df_out, out_path, "Illuminant")
         
     except ValueError as e:
         # These are validation errors we want to show to the user
         return False, str(e)
     except Exception as e:
         # Unexpected errors - log them for debugging
-        logger.exception(f"Unexpected error in illuminant import: {str(e)}")
+        logger.exception("Unexpected error in illuminant import: %s", e)
         return False, f"Unexpected error during import: {str(e)}. Please check the file format and try again."
 
 # ============================================================================
@@ -794,7 +780,7 @@ def import_qe_from_csv(uploaded_file, brand, model):
         
         # Parse the CSV with error handling
         try:
-            raw_data = parse_csv(uploaded_file)
+            raw_data = _parse_csv(uploaded_file)
         except ValueError as e:
             return False, f"CSV parsing failed: {str(e)}"
         
@@ -817,7 +803,7 @@ def import_qe_from_csv(uploaded_file, brand, model):
         wavelengths, r_qe, g_qe, b_qe = wavelengths[:min_size], r_qe[:min_size], g_qe[:min_size], b_qe[:min_size]
         
         # Validate wavelength range
-        is_valid, error_msg = validate_wavelength_data(wavelengths, r_qe, "QE")
+        is_valid, error_msg = _validate_wavelength_data(wavelengths, r_qe, "QE")
         if not is_valid:
             return False, error_msg
         
@@ -828,15 +814,14 @@ def import_qe_from_csv(uploaded_file, brand, model):
             if values.max() > 100:
                 return False, f"{channel} channel QE values seem too high (max: {values.max():.3f}). Expected 0-1 or 0-100."
 
-        # Interpolate to standard grid (300-1100nm)
-        target_wl = np.arange(300, 1101, 1)
-        r_interp = np.interp(target_wl, wavelengths, r_qe)
-        g_interp = np.interp(target_wl, wavelengths, g_qe)
-        b_interp = np.interp(target_wl, wavelengths, b_qe)
+        # Interpolate to standard grid
+        r_interp = np.interp(INTERP_GRID, wavelengths, r_qe)
+        g_interp = np.interp(INTERP_GRID, wavelengths, g_qe)
+        b_interp = np.interp(INTERP_GRID, wavelengths, b_qe)
 
         # Create output DataFrame
         output_df = pd.DataFrame({
-            'Wavelength': target_wl,
+            'Wavelength': INTERP_GRID,
             'R': r_interp,
             'G': g_interp,
             'B': b_interp,
@@ -845,25 +830,19 @@ def import_qe_from_csv(uploaded_file, brand, model):
         })
 
         # Save file
-        filename = f"{sanitize_filename(brand)}_{sanitize_filename(model)}_QE.tsv"
+        filename = f"{_sanitize_filename(brand)}_{_sanitize_filename(model)}_QE.tsv"
         out_dir = Path(DATA_FOLDERS['qe'])
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / filename
         
-        # Save the file
-        try:
-            output_df.to_csv(out_path, sep='\t', index=False)
-        except Exception as e:
-            return False, f"Failed to save file to {out_path}: {str(e)}"
-            
-        return True, f"QE data saved successfully to {out_path}"
+        return _safe_file_save(output_df, out_path, "QE")
         
     except ValueError as e:
         # These are validation errors we want to show to the user
         return False, str(e)
     except Exception as e:
         # Unexpected errors - log them for debugging
-        logger.exception(f"Unexpected error in QE import: {str(e)}")
+        logger.exception("Unexpected error in QE import: %s", e)
         return False, f"Unexpected error during import: {str(e)}. Please check the file format and try again."
 
 # ============================================================================
@@ -893,7 +872,7 @@ def import_reflectance_absorption_from_csv(uploaded_file, meta, extrap_lower, ex
             
         # Parse the CSV with detailed error handling
         try:
-            raw_data = parse_csv(uploaded_file)
+            raw_data = _parse_csv(uploaded_file)
         except ValueError as e:
             return False, f"CSV parsing failed: {str(e)}"
             
@@ -905,7 +884,7 @@ def import_reflectance_absorption_from_csv(uploaded_file, meta, extrap_lower, ex
         return False, str(e)
     except Exception as e:
         # Unexpected errors - log them for debugging
-        logger.exception(f"Unexpected error in reflectance import: {str(e)}")
+        logger.exception("Unexpected error in reflectance import: %s", e)
         return False, f"Unexpected error during import: {str(e)}. Please check the file format and try again."
 
 
@@ -915,7 +894,7 @@ def _import_standard_reflectance(raw_data, meta, extrap_lower, extrap_upper):
     values = raw_data.iloc[:, 1].dropna().values
 
     # Validate wavelength data using common utility
-    is_valid, error_msg = validate_wavelength_data(wavelengths, values, "reflectance")
+    is_valid, error_msg = _validate_wavelength_data(wavelengths, values, "reflectance")
     if not is_valid:
         return False, error_msg
 
@@ -925,11 +904,11 @@ def _import_standard_reflectance(raw_data, meta, extrap_lower, extrap_upper):
     values = values[sort_idx]
 
     # Determine wavelength range
-    min_wl, max_wl = get_wavelength_range(wavelengths, extrap_lower, extrap_upper)
+    min_wl, max_wl = _get_wavelength_range(wavelengths, extrap_lower, extrap_upper)
     new_wavelengths = np.arange(min_wl, max_wl + 1, 1)
     
     # Interpolate
-    interpolated = interpolate_spectrum(
+    interpolated = _interpolate_spectrum(
         wavelengths, values, new_wavelengths,
         extrap_lower, extrap_upper
     )
@@ -959,8 +938,8 @@ def _import_standard_reflectance(raw_data, meta, extrap_lower, extrap_upper):
 def _save_reflectance_file(df, meta, extrap_lower, extrap_upper, data_type):
     """Save reflectance DataFrame to file with proper naming."""
     base_name = meta.get("name", "spectrum")
-    sanitized = sanitize_filename(base_name)
-    suffix = get_extrapolation_suffix(extrap_lower, extrap_upper)
+    sanitized = _sanitize_filename(base_name)
+    suffix = _get_extrapolation_suffix(extrap_lower, extrap_upper)
     filename = f"{sanitized}{suffix}.tsv"
     
     folder = "plant" if "plant" in meta.get("category", "").lower() else "other"
@@ -969,7 +948,7 @@ def _save_reflectance_file(df, meta, extrap_lower, extrap_upper, data_type):
     out_path = out_dir / filename
     
     # Save the file
-    success, message = safe_file_save(df, out_path, data_type)
+    success, message = _safe_file_save(df, out_path, data_type)
     return success, message
 
 # ============================================================================

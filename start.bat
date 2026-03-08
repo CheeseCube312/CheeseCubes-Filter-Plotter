@@ -1,3 +1,7 @@
 @echo off
+cd /d "%~dp0"
 call .venv\Scripts\activate
-streamlit run program\app.py
+python program\app.py
+echo.
+echo Server has exited. Press any key to close this window.
+pause >nul

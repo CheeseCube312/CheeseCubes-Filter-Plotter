@@ -11,8 +11,6 @@ Data Initialization:
 
 Report Generation:
 - generate_application_report(): Creates comprehensive PNG analysis reports
-- generate_full_report(): Creates both PNG and TSV reports with matching filenames
-- generate_tsv_for_download(): Creates TSV export files for filter stacks
 
 System Operations:
 - rebuild_application_cache(): Clears and rebuilds data caches
@@ -31,17 +29,16 @@ Architecture:
 - Supports both synchronous and background operation patterns
 """
 # Standard library imports
+import logging
 import re
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional
 
 # Third-party imports
 import numpy as np
-import streamlit as st
 
 # Local imports
-from models.core import FilterCollection, ReflectorCollection
+from models.core import AppData, FilterCollection, ReflectorCollection
 from models.constants import INTERP_GRID, DATA_FOLDERS
 from services.data import (
     load_filter_collection,
@@ -51,22 +48,29 @@ from services.data import (
     create_empty_filter_collection,
     create_empty_reflector_collection
 )
-from views.ui_utils import try_operation, handle_error
+
+logger = logging.getLogger(__name__)
+
+
+def _try_operation(operation, error_message, default_value=None):
+    """Execute an operation with error handling via logging.
+    
+    Pure Python wrapper for safe operation execution with error handling.
+    Services use this to safely execute operations without UI dependencies.
+    """
+    try:
+        return operation()
+    except Exception as e:
+        logger.error(f"{error_message}: {e}")
+        return default_value
 from services.calculations import (
     compute_filter_transmission,
     compute_selected_filter_indices,
     compute_effective_stops,
-    compute_rgb_response,
     compute_white_balance_gains
 )
-from services.visualization import (
-    add_filter_curve_to_matplotlib, generate_report_png_v2,
-    create_report_config, create_filter_data, create_computation_functions, create_sensor_data
-)
-
-# Type checking imports
-if TYPE_CHECKING:
-    from services.state_manager import StateManager
+from services.visualization import generate_report_png
+from services.state_manager import StateManager
 
 
 # ----- UTILITY FUNCTIONS -----
@@ -131,53 +135,53 @@ def initialize_application_data():
         Cache is automatically invalidated when source files change.
     """
     # Load filter collection
-    filter_collection = try_operation(
+    filter_collection = _try_operation(
         load_filter_collection,
         "Failed to load filter collection",
         default_value=create_empty_filter_collection()
     )
     
     if not filter_collection.filters:
-        handle_error(f"No filter data found. Please add .tsv files to {DATA_FOLDERS['filters']}", stop_execution=True)
+        logger.error(f"No filter data found. Please add .tsv files to {DATA_FOLDERS['filters']}")
         return None
         
     # Load QE data
-    camera_keys, qe_data, default_key = try_operation(
+    camera_keys, qe_data, default_key = _try_operation(
         load_quantum_efficiencies,
         "Failed to load quantum efficiencies", 
         default_value=([], {}, "")
     )
     
     # Load illuminants
-    illuminants, illuminant_metadata = try_operation(
+    illuminants, illuminant_metadata = _try_operation(
         load_illuminant_collection,
         "Failed to load illuminants",
         default_value=({}, {})
     )
     
     # Load reflectors
-    reflector_collection = try_operation(
+    reflector_collection = _try_operation(
         load_reflector_collection,
         "Failed to load reflector collection",
         default_value=create_empty_reflector_collection()
     )
     
-    return {
-        'filter_collection': filter_collection,
-        'camera_keys': camera_keys,
-        'qe_data': qe_data,
-        'default_key': default_key,
-        'illuminants': illuminants,
-        'illuminant_metadata': illuminant_metadata,
-        'reflector_collection': reflector_collection
-    }
+    return AppData(
+        filter_collection=filter_collection,
+        camera_keys=camera_keys,
+        qe_data=qe_data,
+        default_key=default_key,
+        illuminants=illuminants,
+        illuminant_metadata=illuminant_metadata,
+        reflector_collection=reflector_collection,
+    )
 
 
 def generate_application_report(
-    app_state: "StateManager", 
+    app_state: StateManager,
     filter_collection: FilterCollection,
-    selected_camera: Optional[str] = None
-) -> bool:
+    selected_camera: Optional[str] = None,
+) -> Optional[Dict]:
     """
     Generate a PNG report of the current filter configuration.
     
@@ -187,7 +191,7 @@ def generate_application_report(
         selected_camera: Name of selected camera (optional)
         
     Returns:
-        True if report was generated successfully, False otherwise
+        Report result dict if successful, None otherwise.
     """
     # Get selected filter indices
     selected_indices = compute_selected_filter_indices(
@@ -197,82 +201,61 @@ def generate_application_report(
     )
     
     if not selected_indices:
-        return False
+        return None
         
     # Get filter transmission
-    transmission, transmission_label, combined_transmission = compute_filter_transmission(selected_indices, filter_collection.filter_matrix)
-    
+    transmission, label, combined = compute_filter_transmission(
+        selected_indices, filter_collection.filter_matrix
+    )
     if transmission is None:
-        return False
-        
-    # Calculate sensor QE
-    sensor_qe = None
-    if app_state.current_qe:
-        responses, rgb_matrix, _ = compute_rgb_response(
-            transmission, 
-            app_state.current_qe,
-            app_state.white_balance_gains,
-            app_state.rgb_channels_visibility
-        )
-        # Use raw Green channel QE for effective stops calculation
-        sensor_qe = app_state.current_qe.get('G', None) if app_state.current_qe else None
+        return None
+
+    active_trans = combined if combined is not None else transmission
     
-    # Get illuminant
-    illuminant = (app_state.illuminant if app_state.illuminant is not None 
-                 else np.ones_like(INTERP_GRID))
-    
-    # Compute effective stops
-    effective_stops_fn = lambda t, qe, illum: compute_effective_stops(t, qe, illum) if qe is not None else (0.0, 0.0)
-    
-    # Compute white balance
-    white_balance_fn = lambda t, qe, illum: (
-        compute_white_balance_gains(t, qe, illum) if qe is not None 
-        else {"R": 1.0, "G": 1.0, "B": 1.0}
+    # Resolve sensor QE and illuminant
+    sensor_qe = (
+        app_state.current_qe.get('G') if app_state.current_qe else None
+    )
+    illuminant = (
+        app_state.illuminant if app_state.illuminant is not None
+        else np.ones_like(INTERP_GRID)
     )
     
-    # Generate report using new data class structure (simplified version)
-    report_config = create_report_config(
+    # Compute metrics
+    avg_trans, stops = (
+        compute_effective_stops(active_trans, sensor_qe, illuminant)
+        if sensor_qe is not None else (0.0, 0.0)
+    )
+    wb = (
+        compute_white_balance_gains(active_trans, app_state.current_qe, illuminant)
+        if app_state.current_qe else {"R": 1.0, "G": 1.0, "B": 1.0}
+    )
+    
+    camera_name = selected_camera or "UnknownCamera"
+    illuminant_name = app_state.illuminant_name or "UnknownIlluminant"
+    
+    result = generate_report_png(
         selected_filters=app_state.selected_filters,
+        selected_indices=selected_indices,
+        active_transmission=active_trans,
+        transmission_label=label,
+        combined_transmission=combined,
+        effective_stops=stops,
+        avg_transmission=avg_trans,
+        white_balance_gains=wb,
         current_qe=app_state.current_qe,
-        camera_name=selected_camera or "UnknownCamera",
-        illuminant_name=app_state.illuminant_name or "UnknownIlluminant",
-        illuminant_curve=illuminant
-    )
-    
-    filter_data = create_filter_data(
-        filter_matrix=filter_collection.filter_matrix,
-        df=filter_collection.df,
+        sensor_qe=sensor_qe,
+        camera_name=camera_name,
+        illuminant_name=illuminant_name,
+        filter_df=filter_collection.df,
         display_to_index=filter_collection.get_display_to_index_map(),
+        filter_matrix=filter_collection.filter_matrix,
         masks=filter_collection.extrapolated_masks,
-        interp_grid=INTERP_GRID
+        interp_grid=INTERP_GRID,
+        sanitize_fn=sanitize_filename_component,
     )
-    
-    computation_fns = create_computation_functions(
-        compute_selected_indices_fn=lambda sel: selected_indices,
-        compute_filter_transmission_fn=lambda idxs: compute_filter_transmission(
-            idxs, filter_collection.filter_matrix
-        ),
-        compute_effective_stops_fn=effective_stops_fn,
-        compute_white_balance_gains_fn=white_balance_fn,
-        add_curve_fn=add_filter_curve_to_matplotlib,
-        sanitize_fn=sanitize_filename_component
-    )
-    
-    sensor_data = create_sensor_data(sensor_qe=sensor_qe)
-    
-    # Use new simplified interface (4 parameters instead of 17)
-    result = generate_report_png_v2(
-        report_config=report_config,
-        filter_data=filter_data,
-        computation_fns=computation_fns,
-        sensor_data=sensor_data
-    )
-    
-    if result:
-        app_state.last_export = result
-        return True
-        
-    return False
+
+    return result or None
 
 
 def rebuild_application_cache(cache_dir: Path) -> bool:
@@ -296,191 +279,3 @@ def rebuild_application_cache(cache_dir: Path) -> bool:
             success = False
             
     return success
-
-
-def _create_tsv_data(
-    app_state: "StateManager",
-    filter_collection: FilterCollection
-) -> Optional[str]:
-    """
-    Create TSV data for filter stack export.
-    
-    Args:
-        app_state: Current application state
-        filter_collection: Available filters
-        
-    Returns:
-        TSV content string or None if export fails
-    """
-    # Get selected filter indices
-    selected_indices = compute_selected_filter_indices(
-        app_state.selected_filters,
-        app_state.filter_multipliers,
-        filter_collection
-    )
-    
-    if not selected_indices:
-        return None
-    
-    # Get filter transmission data
-    transmission, _, combined_transmission = compute_filter_transmission(
-        selected_indices,
-        filter_collection.filter_matrix
-    )
-    
-    if transmission is None:
-        return None
-    
-    # Use combined transmission if available, otherwise single filter transmission
-    active_transmission = combined_transmission if combined_transmission is not None else transmission
-    
-    # Build metadata for the combined filter stack
-    display_to_index = filter_collection.get_display_to_index_map()
-    counts = {}
-    for filter_name in app_state.selected_filters:
-        if filter_name in display_to_index:
-            idx = display_to_index[filter_name]
-            filter_row = filter_collection.df.iloc[idx]
-            
-            key = (filter_row['Manufacturer'], filter_row['Filter Number'], filter_row['Filter Name'])
-            multiplier = app_state.filter_multipliers.get(filter_name, 1)
-            counts[key] = counts.get(key, 0) + multiplier
-    
-    # Create metadata string with "+" separator
-    metadata_parts = []
-    for (manufacturer, filter_number, filter_name), count in counts.items():
-        if count > 1:
-            part = f"{manufacturer} {filter_number} ({filter_name}) x{count}"
-        else:
-            part = f"{manufacturer} {filter_number} ({filter_name})"
-        metadata_parts.append(part)
-    
-    combined_metadata = " + ".join(metadata_parts)
-    
-    # Get the first filter's hex color
-    first_filter_idx = selected_indices[0]
-    first_filter_row = filter_collection.df.iloc[first_filter_idx]
-    hex_color = first_filter_row.get('Hex Color', '#808080')
-    
-    # Filter to only include wavelengths where we have actual filter data
-    # The interpolation function fills values outside filter range with NaN
-    # So we only include wavelengths where transmission is not NaN (indicating actual filter coverage)
-    transmission_percentage = active_transmission * 100
-    
-    # Create mask for wavelengths with actual filter data (not NaN)
-    meaningful_data_mask = ~np.isnan(active_transmission)
-    
-    # If no valid data found, include all data (fallback - shouldn't happen)
-    if not np.any(meaningful_data_mask):
-        meaningful_data_mask = np.ones_like(active_transmission, dtype=bool)
-    
-    # Create filtered arrays only for meaningful wavelengths
-    valid_wavelengths = INTERP_GRID[meaningful_data_mask].astype(int)
-    valid_transmission = np.round(transmission_percentage[meaningful_data_mask], 3)
-    
-    # Build TSV content manually to avoid pandas formatting issues
-    header = "Wavelength\tTransmittance\thex_color\tManufacturer\tName\tFilter Number"
-    rows = [header]
-    
-    # Build data rows - metadata only on first row
-    for i, (wavelength, transmission) in enumerate(zip(valid_wavelengths, valid_transmission)):
-        if i == 0:
-            # First row includes all metadata
-            row_data = [
-                str(int(wavelength)),
-                str(transmission), 
-                hex_color,
-                combined_metadata,
-                "Combined Filter Stack",
-                f"STACK_{len(selected_indices)}"
-            ]
-        else:
-            # Subsequent rows have empty metadata fields
-            row_data = [str(int(wavelength)), str(transmission), "", "", "", ""]
-        
-        rows.append("\t".join(row_data))
-    
-    return "\n".join(rows)
-
-
-def generate_tsv_for_download(
-    app_state: "StateManager",
-    filter_collection: FilterCollection
-) -> bool:
-    """
-    Generate TSV data and prepare it for download (does not save to disk).
-    
-    Args:
-        app_state: Current application state
-        filter_collection: Available filters
-        
-    Returns:
-        True if generation was successful, False otherwise
-    """
-    tsv_content = _create_tsv_data(app_state, filter_collection)
-    if not tsv_content:
-        return False
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"FilterStack_{timestamp}.tsv"
-    app_state.last_tsv_export = {
-        'bytes': tsv_content.encode('utf-8'),
-        'name': filename,
-        'timestamp': timestamp
-    }
-    
-    return True
-
-
-def generate_full_report(
-    app_state: "StateManager",
-    filter_collection: FilterCollection,
-    selected_camera: Optional[str] = None
-) -> bool:
-    """
-    Generate both PNG and TSV reports and save them to the output folder with matching filter names.
-    
-    Args:
-        app_state: Current application state
-        filter_collection: Available filters
-        selected_camera: Name of selected camera (optional)
-        
-    Returns:
-        True if at least one report was generated successfully, False otherwise
-    """
-    png_success = False
-    tsv_success = False
-    
-    # Generate PNG report (this already saves to output folder with filter-based name)
-    if generate_application_report(app_state, filter_collection, selected_camera):
-        if app_state.last_export and app_state.last_export.get("name"):
-            png_success = True
-            
-            # Extract base name from PNG (remove .png extension) for TSV
-            png_name = app_state.last_export["name"]
-            base_filename = png_name.replace(".png", "")
-            
-            # Generate TSV export with same base name
-            tsv_content = _create_tsv_data(app_state, filter_collection)
-            if tsv_content:
-                # Create output directory (same as PNG)
-                camera_name = selected_camera or "UnknownCamera"
-                illuminant_name = app_state.illuminant_name or "UnknownIlluminant"
-                output_dir = Path("output") / sanitize_filename_component(camera_name) / sanitize_filename_component(illuminant_name)
-                output_dir.mkdir(parents=True, exist_ok=True)
-                
-                # Save TSV to output folder with same base name as PNG
-                tsv_path = output_dir / f"{base_filename}.tsv"
-                with open(tsv_path, "w", encoding='utf-8') as f:
-                    f.write(tsv_content)
-                
-                # Also store for download
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                app_state.last_tsv_export = {
-                    'bytes': tsv_content.encode('utf-8'),
-                    'name': f"{base_filename}.tsv",
-                    'timestamp': timestamp
-                }
-                tsv_success = True
-    
-    return png_success or tsv_success

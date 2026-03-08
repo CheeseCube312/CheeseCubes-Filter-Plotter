@@ -1,384 +1,526 @@
 """
-Unified State Management for FS FilterLab.
+State Management for FS FilterLab.
 
-This module provides centralized application state management using Streamlit's
-session_state as the single source of truth, with a clean object-oriented
-interface for type-safe state access and modification.
+Dict-backed reactive state with change callbacks. UI binds to state values,
+and updates trigger targeted re-renders via registered listeners.
 """
-import streamlit as st
+import json
+import logging
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
 import numpy as np
-from typing import Any, Dict, List, Optional, Union
 
-from models.constants import DEFAULT_WB_GAINS, DEFAULT_CHANNEL_MIXER
-from models.core import TargetProfile, ChannelMixerSettings
+from models.constants import DEFAULT_WB_GAINS
+from models.core import ChannelMixerSettings, Filter
 
-
-# =============================================================================
-# STATE CONFIGURATION CONSTANTS
-# =============================================================================
-
-# Default values for all state keys - single source of truth
-# Note: white_balance_gains uses .copy() when accessed to prevent mutation
-STATE_DEFAULTS = {
-    # Filter data
-    'selected_filters': [],
-    'filter_multipliers': {},
-    
-    # QE and illuminant data  
-    'current_qe': None,
-    'selected_camera': None,
-    'illuminant': None,
-    'illuminant_name': None,
-    
-    # Target profile
-    'target_profile': None,
-    
-    # Computed results
-    'combined_transmission': None,
-    'white_balance_gains': DEFAULT_WB_GAINS,  # .copy() applied on access
-    'wb_reference_surface': None,  # Source file of surface used for WB reference
-    
-    # Export/report state
-    'last_export': {},
-    'last_tsv_export': {},
-    
-    # UI state (non-widget controlled)
-    'import_status': None,
-    'import_error_message': None,
-}
-
-# Keys that are managed by Streamlit widgets - don't initialize manually
-WIDGET_CONTROLLED_KEYS = {
-    'selected_filters', 'show_advanced_search', 'show_import_data', 
-    'sidebar_log_view_toggle', 'apply_white_balance_toggle', 
-    'show_R', 'show_G', 'show_B', 'show_channel_mixer'
-}
+logger = logging.getLogger(__name__)
 
 
 class StateManager:
     """
-    Unified state management with dynamic attribute access.
-    
-    This class provides a clean, object-oriented interface to Streamlit's session_state
-    while maintaining session_state as the single source of truth. It handles:
-    
-    - Automatic initialization of required state keys with sensible defaults
-    - Type-safe attribute access with fallback values
-    - Protection against widget-controlled key modification conflicts
-    - Dynamic attribute access for clean, Pythonic state management
-    
-    State Organization:
-        Filter State: selected_filters, filter_multipliers
-        Sensor Data: current_qe, selected_camera, illuminant, illuminant_name
-        Analysis: target_profile, combined_transmission, white_balance_gains
-        UI Settings: Various display preferences and toggles
-        Export: last_export metadata for download functionality
-        
-    Widget Handling:
-        Some state keys are controlled by Streamlit widgets and cannot be
-        modified programmatically. The StateManager automatically detects
-        and handles these cases gracefully.
-        
-    Thread Safety:
-        Safe for use in Streamlit's single-threaded execution model.
-        All state modifications go through session_state.
+    Application state manager.
+
+    Uses a plain dict as backing store with explicit property accessors.
+    Change listeners can be registered to trigger UI updates when specific
+    state keys change.
     """
-    
-    def __init__(self):
-        """
-        Initialize the state manager and ensure all required keys exist.
-        
-        Sets up default values for all non-widget state keys and prepares
-        the manager for dynamic attribute access.
-        """
-        self._ensure_initialized()
-    
-    def _ensure_initialized(self) -> None:
-        """
-        Initialize all required state keys in session_state with defaults.
-        
-        This method is idempotent - calling it multiple times has no adverse
-        effects and ensures state consistency across application restarts.
-        
-        Widget-controlled keys are explicitly excluded to avoid conflicts
-        with Streamlit's widget management system.
-        """
-        for key, default_value in STATE_DEFAULTS.items():
-            if key not in st.session_state and key not in WIDGET_CONTROLLED_KEYS:
-                # Use .copy() for mutable defaults to prevent shared state
-                if isinstance(default_value, dict):
-                    st.session_state[key] = default_value.copy()
-                elif isinstance(default_value, list):
-                    st.session_state[key] = default_value.copy()
-                else:
-                    st.session_state[key] = default_value
 
+    _DEFAULT_REFLECTORS_FILE = "program/data/reflectors/default_reflectors.json"
 
-    
-    # ========================================================================
-    # DYNAMIC ATTRIBUTE ACCESS
-    # ========================================================================
-    
-    def __getattr__(self, name: str) -> Any:
-        """
-        Get state attribute with appropriate default values.
-        
-        Provides dynamic access to session_state keys as object attributes,
-        with intelligent defaults based on the attribute name and type.
-        
-        Args:
-            name: Attribute name to retrieve from session_state
-            
-        Returns:
-            Value from session_state or appropriate default if not set
-            
-        Default Value Logic:
-            - Lists: Empty list []
-            - Dicts: Empty dict {} (with special cases for gains/visibility)
-            - Booleans: False
-            - Optional types: None
-            - Numbers: 0 or 1.0 as appropriate
-            
-        Example:
-            state.selected_filters  # Returns [] if not set
-            state.current_qe        # Returns None if not set
-            state.log_view         # Returns False if not set
-        """
-        # Handle special cases for widget-controlled state
-        if name == 'log_view':
-            return st.session_state.get('sidebar_log_view_toggle', False)
-        elif name == 'show_advanced_search':
-            return st.session_state.get('show_advanced_search', False)
-        elif name == 'show_import_data':
-            return st.session_state.get('show_import_data', False)
-        elif name == 'apply_white_balance':
-            return st.session_state.get('apply_white_balance_toggle', False)
-        elif name == 'rgb_channels_visibility':
-            # Read RGB channel states from individual widget keys
-            return {
-                'R': st.session_state.get('show_R', True),
-                'G': st.session_state.get('show_G', True),
-                'B': st.session_state.get('show_B', True)
-            }
-        elif name == 'show_channel_mixer':
-            return st.session_state.get('show_channel_mixer', False)
-        elif name == 'channel_mixer':
-            # Always return fresh mixer with current session state values
-            # This ensures sliders are always immediately reflected in calculations
-            return self._build_live_channel_mixer()
-        
-        if name.startswith('_'):
-            # Don't interfere with private attributes
-            raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
-        
-        # Use STATE_DEFAULTS for fallback values, with .copy() for mutable types
-        default = STATE_DEFAULTS.get(name)
-        if isinstance(default, (dict, list)):
-            default = default.copy() if default else default
-        return st.session_state.get(name, default)
-    
-    def __setattr__(self, name: str, value: Any) -> None:
-        """Set attribute in session state."""
-        if name.startswith('_'):
-            # Allow private attributes to be set normally
-            super().__setattr__(name, value)
-        elif name in WIDGET_CONTROLLED_KEYS or name in ('log_view', 'apply_white_balance', 'rgb_channels_visibility'):
-            # Widget-controlled keys should not be manually set, they're managed by Streamlit
-            pass
-        else:
-            st.session_state[name] = value
-    
-        
-    def get_selected_reflector_idx(self) -> Optional[Union[int, str]]:
-        """Get currently selected reflector index."""
-        return st.session_state.get("selected_reflector_idx", None)
-    
-    def set_selected_reflector_idx(self, idx: Optional[Union[int, str]]) -> None:
-        """Set selected reflector index."""
-        st.session_state["selected_reflector_idx"] = idx
-    
+    def __init__(self) -> None:
+        self._store: Dict[str, Any] = {}
+        self._listeners: Dict[str, List[Callable]] = {}
+        self._init_defaults()
+
+    # ====================================================================
+    # INITIALISATION
+    # ====================================================================
+
+    def _init_defaults(self) -> None:
+        """Populate the backing store with sensible defaults."""
+        defaults: Dict[str, Any] = {
+            # Filter data
+            "selected_filters": [],
+            "filter_multipliers": {},
+            # QE and illuminant
+            "current_qe": None,
+            "selected_camera": None,
+            "illuminant": None,
+            "illuminant_name": None,
+            # Target profile
+            "target_profile": None,
+            "selected_target_name": None,
+            # Computed results
+            "combined_transmission": None,
+            "white_balance_gains": DEFAULT_WB_GAINS.copy(),
+            "wb_reference_surface": None,
+            # Export
+            "last_export": {},
+            # Display toggles
+            "log_view": False,
+            "apply_white_balance": False,
+            "show_advanced_search": False,
+            "show_import_data": False,
+            "show_reflector_search": False,
+            # Advanced filter search state (persists across UI rebuilds)
+            "advanced_search_manufacturers": [],
+            "advanced_search_wavelength": 550,
+            "advanced_search_trans_min": 0,
+            "advanced_search_trans_max": 100,
+            "advanced_search_sort": "Filter Number",
+            # RGB channel visibility
+            "show_R": True,
+            "show_G": True,
+            "show_B": True,
+            # Channel mixer settings (identity matrix, disabled)
+            "channel_mixer": ChannelMixerSettings(),
+            # Import state
+            "import_status": None,
+            "import_error_message": None,
+            # Sidebar expansion open/closed state (persists across rebuilds)
+            "sidebar_expansions": {},
+        }
+        for key, value in defaults.items():
+            if key not in self._store:
+                self._store[key] = value
+
+    # ====================================================================
+    # CHANGE LISTENER MECHANISM
+    # ====================================================================
+
+    def on_change(self, key: str, callback: Callable) -> None:
+        """Register *callback* to fire when *key* changes."""
+        self._listeners.setdefault(key, []).append(callback)
+
+    def _notify(self, key: str) -> None:
+        for cb in self._listeners.get(key, []):
+            try:
+                cb()
+            except Exception:
+                logger.exception("Listener error for key %s", key)
+
+    def _set(self, key: str, value: Any) -> None:
+        old = self._store.get(key)
+        self._store[key] = value
+        # Avoid spurious notifications for identical primitive values
+        if old is not value:
+            self._notify(key)
+
+    # ====================================================================
+    # WIDGET-CONTROLLED PROPERTIES
+    # ====================================================================
+
+    @property
+    def selected_filters(self) -> List[str]:
+        return self._store.get("selected_filters", [])
+
+    @selected_filters.setter
+    def selected_filters(self, value: List[str]) -> None:
+        self._set("selected_filters", list(value))
+
+    @property
+    def show_advanced_search(self) -> bool:
+        return self._store.get("show_advanced_search", False)
+
+    @show_advanced_search.setter
+    def show_advanced_search(self, value: bool) -> None:
+        self._set("show_advanced_search", value)
+
+    # Advanced filter search state properties
+    @property
+    def advanced_search_manufacturers(self) -> List[str]:
+        return self._store.get("advanced_search_manufacturers", [])
+
+    @advanced_search_manufacturers.setter
+    def advanced_search_manufacturers(self, value: List[str]) -> None:
+        self._set("advanced_search_manufacturers", value)
+
+    @property
+    def advanced_search_wavelength(self) -> int:
+        return self._store.get("advanced_search_wavelength", 550)
+
+    @advanced_search_wavelength.setter
+    def advanced_search_wavelength(self, value: int) -> None:
+        self._set("advanced_search_wavelength", value)
+
+    @property
+    def advanced_search_trans_min(self) -> int:
+        return self._store.get("advanced_search_trans_min", 0)
+
+    @advanced_search_trans_min.setter
+    def advanced_search_trans_min(self, value: int) -> None:
+        self._set("advanced_search_trans_min", value)
+
+    @property
+    def advanced_search_trans_max(self) -> int:
+        return self._store.get("advanced_search_trans_max", 100)
+
+    @advanced_search_trans_max.setter
+    def advanced_search_trans_max(self, value: int) -> None:
+        self._set("advanced_search_trans_max", value)
+
+    @property
+    def advanced_search_sort(self) -> str:
+        return self._store.get("advanced_search_sort", "Filter Number")
+
+    @advanced_search_sort.setter
+    def advanced_search_sort(self, value: str) -> None:
+        self._set("advanced_search_sort", value)
+
+    @property
+    def show_import_data(self) -> bool:
+        return self._store.get("show_import_data", False)
+
+    @show_import_data.setter
+    def show_import_data(self, value: bool) -> None:
+        self._set("show_import_data", value)
+
+    @property
+    def show_channel_mixer(self) -> bool:
+        return self.channel_mixer.enabled
+
+    @show_channel_mixer.setter
+    def show_channel_mixer(self, value: bool) -> None:
+        mixer = self.channel_mixer
+        if mixer.enabled != value:
+            mixer.enabled = value
+            self.channel_mixer = mixer
+
+    @property
+    def show_reflector_search(self) -> bool:
+        return self._store.get("show_reflector_search", False)
+
+    @show_reflector_search.setter
+    def show_reflector_search(self, value: bool) -> None:
+        self._set("show_reflector_search", value)
+
+    @property
+    def sidebar_expansions(self) -> Dict[str, bool]:
+        """Open/closed state for each named sidebar expander."""
+        return self._store.get("sidebar_expansions", {})
+
+    @sidebar_expansions.setter
+    def sidebar_expansions(self, value: Dict[str, bool]) -> None:
+        self._store["sidebar_expansions"] = value  # direct write — no listener needed
+
+    # ====================================================================
+    # COMPUTED / DISPLAY PROPERTIES
+    # ====================================================================
+
+    @property
+    def log_view(self) -> bool:
+        return self._store.get("log_view", False)
+
+    @log_view.setter
+    def log_view(self, value: bool) -> None:
+        self._set("log_view", value)
+
+    @property
+    def apply_white_balance(self) -> bool:
+        return self._store.get("apply_white_balance", False)
+
+    @apply_white_balance.setter
+    def apply_white_balance(self, value: bool) -> None:
+        self._set("apply_white_balance", value)
+
+    @property
+    def rgb_channels_visibility(self) -> Dict[str, bool]:
+        return {
+            "R": self._store.get("show_R", True),
+            "G": self._store.get("show_G", True),
+            "B": self._store.get("show_B", True),
+        }
+
+    @rgb_channels_visibility.setter
+    def rgb_channels_visibility(self, value: Dict[str, bool]) -> None:
+        for ch in ("R", "G", "B"):
+            self._set(f"show_{ch}", value.get(ch, True))
+
+    @property
+    def channel_mixer(self) -> ChannelMixerSettings:
+        return self._store.get("channel_mixer", ChannelMixerSettings())
+
+    @channel_mixer.setter
+    def channel_mixer(self, value: ChannelMixerSettings) -> None:
+        self._set("channel_mixer", value)
+
+    # ====================================================================
+    # READ-WRITE STATE PROPERTIES
+    # ====================================================================
+
+    @property
+    def filter_multipliers(self) -> Dict[str, int]:
+        return self._store.get("filter_multipliers", {})
+
+    @filter_multipliers.setter
+    def filter_multipliers(self, value: Dict[str, int]) -> None:
+        self._set("filter_multipliers", dict(value))
+
+    @property
+    def current_qe(self) -> Optional[Dict[str, np.ndarray]]:
+        return self._store.get("current_qe")
+
+    @current_qe.setter
+    def current_qe(self, value: Optional[Dict[str, np.ndarray]]) -> None:
+        self._set("current_qe", value)
+
+    @property
+    def selected_camera(self) -> Optional[str]:
+        return self._store.get("selected_camera")
+
+    @selected_camera.setter
+    def selected_camera(self, value: Optional[str]) -> None:
+        self._set("selected_camera", value)
+
+    @property
+    def illuminant(self) -> Optional[np.ndarray]:
+        return self._store.get("illuminant")
+
+    @illuminant.setter
+    def illuminant(self, value: Optional[np.ndarray]) -> None:
+        self._set("illuminant", value)
+
+    @property
+    def illuminant_name(self) -> Optional[str]:
+        return self._store.get("illuminant_name")
+
+    @illuminant_name.setter
+    def illuminant_name(self, value: Optional[str]) -> None:
+        self._set("illuminant_name", value)
+
+    @property
+    def target_profile(self) -> Optional[Filter]:
+        return self._store.get("target_profile")
+
+    @target_profile.setter
+    def target_profile(self, value: Optional[Filter]) -> None:
+        self._set("target_profile", value)
+
+    @property
+    def selected_target_name(self) -> Optional[str]:
+        return self._store.get("selected_target_name")
+
+    @selected_target_name.setter
+    def selected_target_name(self, value: Optional[str]) -> None:
+        self._set("selected_target_name", value)
+
+    @property
+    def combined_transmission(self) -> Optional[np.ndarray]:
+        return self._store.get("combined_transmission")
+
+    @combined_transmission.setter
+    def combined_transmission(self, value: Optional[np.ndarray]) -> None:
+        self._set("combined_transmission", value)
+
+    @property
+    def white_balance_gains(self) -> Dict[str, float]:
+        g = self._store.get("white_balance_gains")
+        return g.copy() if isinstance(g, dict) else DEFAULT_WB_GAINS.copy()
+
+    @white_balance_gains.setter
+    def white_balance_gains(self, value: Dict[str, float]) -> None:
+        self._set("white_balance_gains", dict(value))
+
+    @property
+    def wb_reference_surface(self) -> Optional[str]:
+        return self._store.get("wb_reference_surface")
+
+    @wb_reference_surface.setter
+    def wb_reference_surface(self, value: Optional[str]) -> None:
+        self._set("wb_reference_surface", value)
+
+    @property
+    def last_export(self) -> Dict:
+        return self._store.get("last_export", {})
+
+    @last_export.setter
+    def last_export(self, value: Dict) -> None:
+        self._set("last_export", value)
+
+    # ====================================================================
+    # WHITE BALANCE METHODS
+    # ====================================================================
+
     def set_white_balance_from_surface(
-        self, 
-        reflector: np.ndarray, 
+        self,
+        reflector: np.ndarray,
         transmission: np.ndarray,
-        source_file: Optional[str] = None
+        source_file: Optional[str] = None,
     ) -> None:
-        """
-        Update white balance gains using a selected surface as reference.
-        
-        Args:
-            reflector: Reflectance spectrum of the reference surface
-            transmission: Combined filter transmission values
-            source_file: Source file path of the reference surface (for tracking)
-        """
         from services.calculations import compute_white_balance_gains_from_surface
-        
+
         if self.current_qe and self.illuminant is not None:
             new_gains = compute_white_balance_gains_from_surface(
                 reflector, transmission, self.current_qe, self.illuminant
             )
             self.white_balance_gains = new_gains
-            # Store reference surface so WB can be recalculated when filters change
             self.wb_reference_surface = source_file
-    
+
     def reset_white_balance(self) -> None:
-        """
-        Reset white balance to default behavior (standard computation from transmission/QE/illuminant).
-        """
-        from models.constants import DEFAULT_WB_GAINS
-        
-        # Set back to default gains, which will trigger standard WB computation
         self.white_balance_gains = DEFAULT_WB_GAINS.copy()
-        # Clear reference surface so standard WB computation is used
         self.wb_reference_surface = None
 
-    # ========================================================================
-    # UTILITY METHODS
-    # ========================================================================
-    
-    def _build_live_channel_mixer(self) -> ChannelMixerSettings:
+    def recompute_white_balance(
+        self,
+        trans_interp: np.ndarray,
+        reflector_collection: Any = None,
+    ) -> Dict[str, float]:
+        """Recompute and store white balance gains.
+
+        If a reference surface is set, recalculates gains from that surface.
+        Otherwise computes standard WB from the filter transmission, QE, and
+        illuminant.  Returns the (possibly updated) gains dict.
         """
-        Build a ChannelMixerSettings object with current session state values.
-        
-        This ensures that the channel mixer always reflects the current UI state,
-        eliminating timing issues where slider changes aren't immediately reflected
-        in calculations and visualizations.
-        
-        Returns:
-            ChannelMixerSettings object with current slider values from session state
-        """
-        mixer = ChannelMixerSettings()
-        
-        # Get enabled state from the show_channel_mixer widget
-        mixer.enabled = st.session_state.get('show_channel_mixer', False)
-        
-        # Get all 9 channel mixing values from session state with fallbacks to defaults
-        mixer.red_r = st.session_state.get('red_r', DEFAULT_CHANNEL_MIXER['red_r'])
-        mixer.red_g = st.session_state.get('red_g', DEFAULT_CHANNEL_MIXER['red_g'])
-        mixer.red_b = st.session_state.get('red_b', DEFAULT_CHANNEL_MIXER['red_b'])
-        
-        mixer.green_r = st.session_state.get('green_r', DEFAULT_CHANNEL_MIXER['green_r'])
-        mixer.green_g = st.session_state.get('green_g', DEFAULT_CHANNEL_MIXER['green_g'])
-        mixer.green_b = st.session_state.get('green_b', DEFAULT_CHANNEL_MIXER['green_b'])
-        
-        mixer.blue_r = st.session_state.get('blue_r', DEFAULT_CHANNEL_MIXER['blue_r'])
-        mixer.blue_g = st.session_state.get('blue_g', DEFAULT_CHANNEL_MIXER['blue_g'])
-        mixer.blue_b = st.session_state.get('blue_b', DEFAULT_CHANNEL_MIXER['blue_b'])
-        
-        return mixer
-    
-    # ========================================================================
+        from services.calculations import (
+            compute_white_balance_gains,
+            compute_white_balance_gains_from_surface,
+        )
+
+        wb_gains = self.white_balance_gains
+        if not self.current_qe or self.illuminant is None:
+            return wb_gains
+
+        wb_ref = self.wb_reference_surface
+        if wb_ref and reflector_collection:
+            ref_reflector = None
+            for r in reflector_collection.reflectors:
+                if r.metadata.get("source_file", "") == wb_ref:
+                    ref_reflector = r
+                    break
+
+            if ref_reflector is not None:
+                wb_gains = compute_white_balance_gains_from_surface(
+                    ref_reflector.values, trans_interp,
+                    self.current_qe, self.illuminant,
+                )
+                self.white_balance_gains = wb_gains
+            else:
+                logger.warning("WB reference surface not found: %s", wb_ref)
+                wb_gains = compute_white_balance_gains(
+                    trans_interp, self.current_qe, self.illuminant,
+                )
+                self.white_balance_gains = wb_gains
+                self.wb_reference_surface = None
+        else:
+            wb_gains = compute_white_balance_gains(
+                trans_interp, self.current_qe, self.illuminant,
+            )
+            self.white_balance_gains = wb_gains
+
+        return wb_gains
+
+    # ====================================================================
+    # MULTI-FIELD SELECTION HELPERS
+    # ====================================================================
+
+    def select_illuminant(self, name: str, illuminants: Dict[str, Any]) -> None:
+        """Set the active illuminant by name."""
+        self.illuminant_name = name
+        self.illuminant = illuminants.get(name)
+
+    def select_camera(self, name: Optional[str], qe_data: Dict[str, Any]) -> None:
+        """Set the active camera/QE profile by name."""
+        if name and name != "None":
+            self.selected_camera = name
+            self.current_qe = qe_data.get(name)
+        else:
+            self.selected_camera = None
+            self.current_qe = None
+
+    def select_target(self, name: Optional[str], filter_collection: Any) -> None:
+        """Set the target profile from a named filter."""
+        if not name or name == "None":
+            self.target_profile = None
+            self.selected_target_name = None
+        else:
+            display_to_index = filter_collection.get_display_to_index_map()
+            idx = display_to_index[name]
+            self.target_profile = filter_collection.filters[idx]
+            self.selected_target_name = name
+
+    # ====================================================================
     # DEFAULT REFLECTOR LIST MANAGEMENT
-    # ========================================================================
-    
-    _DEFAULT_REFLECTORS_FILE = "program/data/reflectors/default_reflectors.json"
-    
+    # ====================================================================
+
     def _load_default_reflectors_from_file(self) -> List[str]:
-        """Load default reflector list from JSON file."""
-        import json
-        from pathlib import Path
-        
-        file_path = Path(self._DEFAULT_REFLECTORS_FILE)
-        if file_path.exists():
+        fp = Path(self._DEFAULT_REFLECTORS_FILE)
+        if fp.exists():
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    return data.get('default_reflectors', [])
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                return data.get("default_reflectors", [])
             except (json.JSONDecodeError, IOError):
                 return []
         return []
-    
+
     def _save_default_reflectors_to_file(self, reflector_files: List[str]) -> None:
-        """Save default reflector list to JSON file."""
-        import json
-        from pathlib import Path
-        
-        file_path = Path(self._DEFAULT_REFLECTORS_FILE)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        
+        fp = Path(self._DEFAULT_REFLECTORS_FILE)
+        fp.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump({'default_reflectors': reflector_files}, f, indent=2)
+            fp.write_text(
+                json.dumps({"default_reflectors": reflector_files}, indent=2),
+                encoding="utf-8",
+            )
         except IOError:
-            pass  # Silently fail on write errors
-    
+            pass
+
     def get_default_reflector_files(self) -> List[str]:
-        """
-        Get list of default reflector source file paths.
-        
-        Returns:
-            List of source file paths for default reflectors
-        """
-        # First check session state, then fall back to file
-        if 'default_reflector_files' not in st.session_state:
-            st.session_state['default_reflector_files'] = self._load_default_reflectors_from_file()
-        return st.session_state.get('default_reflector_files', [])
-    
+        if "default_reflector_files" not in self._store:
+            self._store["default_reflector_files"] = self._load_default_reflectors_from_file()
+        return self._store.get("default_reflector_files", [])
+
     def is_default_reflector(self, source_file: str) -> bool:
-        """
-        Check if a reflector is in the default list.
-        
-        Args:
-            source_file: Source file path of the reflector
-            
-        Returns:
-            True if the reflector is in the default list
-        """
         return source_file in self.get_default_reflector_files()
-    
+
     def add_to_default_reflectors(self, source_file: str) -> None:
-        """
-        Add a reflector to the default list.
-        
-        Args:
-            source_file: Source file path of the reflector to add
-        """
         current = self.get_default_reflector_files()
         if source_file not in current:
             current.append(source_file)
-            st.session_state['default_reflector_files'] = current
+            self._store["default_reflector_files"] = current
             self._save_default_reflectors_to_file(current)
-    
+            self._notify("default_reflector_files")
+
     def remove_from_default_reflectors(self, source_file: str) -> None:
-        """
-        Remove a reflector from the default list.
-        
-        Args:
-            source_file: Source file path of the reflector to remove
-        """
         current = self.get_default_reflector_files()
         if source_file in current:
             current.remove(source_file)
-            st.session_state['default_reflector_files'] = current
+            self._store["default_reflector_files"] = current
             self._save_default_reflectors_to_file(current)
+            self._notify("default_reflector_files")
 
+    def seed_isdefault_reflectors(self, reflector_collection: Any) -> None:
+        if not reflector_collection or not hasattr(reflector_collection, "reflectors"):
+            return
+        for reflector in reflector_collection.reflectors:
+            is_default = reflector.metadata.get("IsDefault", "").strip()
+            if is_default:
+                source_file = reflector.metadata.get("source_file", "")
+                if source_file and not self.is_default_reflector(source_file):
+                    self.add_to_default_reflectors(source_file)
+
+    # ====================================================================
+    # GENERIC STORE ACCESS (for cases where direct key access is needed)
+    # ====================================================================
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get a value from the backing store."""
+        return self._store.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        """Set a value in the backing store and fire listeners."""
+        self._set(key, value)
 
 
 # ============================================================================
-# GLOBAL INSTANCE MANAGEMENT
+# GLOBAL INSTANCE
 # ============================================================================
 
-# Singleton instance for application-wide state management
 _state_manager: Optional[StateManager] = None
 
+
 def get_state_manager() -> StateManager:
-    """
-    Get or create the global StateManager instance.
-    
-    Implements singleton pattern to ensure consistent state access across
-    all application modules. The StateManager is created on first access
-    and reused for the entire session.
-    
-    Returns:
-        The global StateManager instance for the current session
-        
-    Thread Safety:
-        Safe in Streamlit's single-threaded execution model.
-        Each browser session gets its own StateManager instance.
-    """
+    """Get or create the global state manager singleton."""
     global _state_manager
     if _state_manager is None:
         _state_manager = StateManager()
     return _state_manager
-
-

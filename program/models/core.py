@@ -6,7 +6,6 @@ This module defines all fundamental data structures used throughout the applicat
 Data Models:
 - Filter: Represents individual optical filters with transmission data
 - FilterCollection: Manages collections of filters with efficient matrix operations
-- TargetProfile: Stores target transmission profiles for comparison analysis
 - ReflectorSpectrum: Individual reflector spectral data
 - ReflectorCollection: Collection of reflector spectra
 - ChannelMixerSettings: RGB channel mixing transformation settings
@@ -18,12 +17,12 @@ Design Principles:
 - Provides utility methods for common operations
 """
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Union, Callable, Tuple, Any
+from typing import Dict, List
 import numpy as np
 import pandas as pd
 
 # Import constants from the constants module
-from models.constants import INTERP_GRID, DEFAULT_RGB_VISIBILITY, DEFAULT_WB_GAINS
+from models.constants import INTERP_GRID
 
 # Filter Models
 @dataclass
@@ -96,31 +95,6 @@ class FilterCollection:
 
 
 @dataclass
-class TargetProfile:
-    """
-    Target transmission profile for comparison and optimization analysis.
-    
-    Used to define desired transmission characteristics and calculate
-    deviation metrics from actual filter performance.
-    
-    Attributes:
-        name: Descriptive name for the target profile
-        values: Target transmission values across the wavelength spectrum
-        valid: Boolean mask indicating which wavelengths have valid target data
-    
-    The values array should align with INTERP_GRID wavelengths and contain
-    transmission values in the range [0, 1].
-    """
-    name: str
-    values: np.ndarray  # Target transmission values
-    valid: np.ndarray   # Boolean mask for valid target values
-    
-    def __str__(self) -> str:
-        """Return the target profile name."""
-        return self.name
-
-
-@dataclass
 class ChannelMixerSettings:
     """
     Channel mixer transformation settings for RGB channel manipulation.
@@ -170,21 +144,6 @@ class ChannelMixerSettings:
             [self.blue_r, self.blue_g, self.blue_b]    # Blue output weights
         ])
     
-    def from_dict(self, settings_dict: Dict[str, Union[float, bool]]) -> None:
-        """Update settings from dictionary (for preset loading)."""
-        for key, value in settings_dict.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
-    
-    def to_dict(self) -> Dict[str, Union[float, bool]]:
-        """Convert settings to dictionary (for preset saving)."""
-        return {
-            'red_r': self.red_r, 'red_g': self.red_g, 'red_b': self.red_b,
-            'green_r': self.green_r, 'green_g': self.green_g, 'green_b': self.green_b,
-            'blue_r': self.blue_r, 'blue_g': self.blue_g, 'blue_b': self.blue_b,
-            'enabled': self.enabled
-        }
-
 
 # Reflector Models
 @dataclass
@@ -225,55 +184,23 @@ class ReflectorCollection:
 
 
 # =============================================================================
-# REPORT AND CHART CONFIGURATION CLASSES
+# APPLICATION DATA CONTAINER
 # =============================================================================
 
 @dataclass
-class ReportConfig:
-    """Configuration for report generation parameters."""
-    selected_filters: List[str]
-    current_qe: Dict[str, np.ndarray]
-    camera_name: str
-    illuminant_name: str
-    illuminant_curve: np.ndarray
+class AppData:
+    """Typed container for all loaded application data.
+
+    Replaces the untyped dict previously returned by
+    ``initialize_application_data()``.
+    """
+    filter_collection: FilterCollection
+    camera_keys: List[str]
+    qe_data: Dict[str, Dict[str, np.ndarray]]
+    default_key: str
+    illuminants: Dict[str, np.ndarray]
+    illuminant_metadata: Dict[str, str]
+    reflector_collection: ReflectorCollection
 
 
-@dataclass
-class FilterData:
-    """Container for filter-related data structures."""
-    filter_matrix: np.ndarray
-    df: Any
-    display_to_index: Dict[str, int]
-    masks: np.ndarray
-    interp_grid: np.ndarray
 
-
-@dataclass  
-class ComputationFunctions:
-    """Container for computation functions used in report generation."""
-    compute_selected_indices_fn: Callable[[List[str]], List[int]]
-    compute_filter_transmission_fn: Callable[[List[int]], Tuple[np.ndarray, str, np.ndarray]]
-    compute_effective_stops_fn: Callable[[np.ndarray, np.ndarray, Optional[np.ndarray]], Tuple[float, float]]
-    compute_white_balance_gains_fn: Callable[[np.ndarray, Dict[str, np.ndarray], np.ndarray], Dict[str, float]]
-    add_curve_fn: Callable
-    sanitize_fn: Callable[[str], str]
-
-
-@dataclass
-class SensorData:
-    """Container for sensor-related parameters."""
-    sensor_qe: np.ndarray
-
-
-@dataclass
-class ChartConfig:
-    """Configuration for chart styling and layout parameters."""
-    title: str = ""
-    x_title: str = "Wavelength (nm)" 
-    y_title: str = "Response"
-    height: Optional[int] = None
-    template: str = "plotly_white"
-    hovermode: str = "x unified"
-    log_scale: bool = False
-    show_legend: bool = True
-    show_spectrum_strip: bool = True

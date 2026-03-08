@@ -3,6 +3,8 @@ Data loading services for FS FilterLab.
 """
 # Standard library imports
 import pickle
+import time
+from io import StringIO
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional, TypeVar, Callable
 
@@ -12,16 +14,16 @@ import pandas as pd
 
 # Local imports
 from models import (
-    Filter, FilterCollection, TargetProfile,
+    Filter, FilterCollection,
     ReflectorSpectrum, ReflectorCollection
 )
 from models.constants import (
-    CACHE_DIR, DEFAULT_HEX_COLOR, DEFAULT_ILLUMINANT, INTERP_GRID,
+    CACHE_DIR, DEFAULT_HEX_COLOR, INTERP_GRID,
     DATA_FOLDERS, TSV_COLUMNS, METADATA_FIELDS, SPECTRAL_CONFIG
 )
 
 
-def interpolate_to_standard_grid(wavelengths: np.ndarray, values: np.ndarray) -> np.ndarray:
+def _interpolate_to_standard_grid(wavelengths: np.ndarray, values: np.ndarray) -> np.ndarray:
     """
     Interpolate spectral data to the standard wavelength grid.
     
@@ -34,13 +36,10 @@ def interpolate_to_standard_grid(wavelengths: np.ndarray, values: np.ndarray) ->
     """
     return np.interp(INTERP_GRID, wavelengths, values, left=np.nan, right=np.nan)
 
-# Ensure cache directory exists
-Path(CACHE_DIR).mkdir(exist_ok=True)
-
 # Generic type for cached data
 T = TypeVar('T')
 
-def parse_comment_headers(file_path: str | Path) -> Tuple[Dict[str, str], List[str]]:
+def _parse_comment_headers(file_path: str | Path) -> Tuple[Dict[str, str], List[str]]:
     """
     Parse comment headers from a TSV file and return metadata and data lines.
     
@@ -80,7 +79,7 @@ def parse_comment_headers(file_path: str | Path) -> Tuple[Dict[str, str], List[s
     return metadata, data_lines
 
 
-def parse_tsv_with_comments(file_path: str | Path) -> Tuple[pd.DataFrame, Dict[str, str]]:
+def _parse_tsv_with_comments(file_path: str | Path) -> Tuple[pd.DataFrame, Dict[str, str]]:
     """
     Parse a TSV file with comment headers, returning both data and metadata.
     
@@ -90,13 +89,12 @@ def parse_tsv_with_comments(file_path: str | Path) -> Tuple[pd.DataFrame, Dict[s
     Returns:
         Tuple of (dataframe, metadata_dict)
     """
-    metadata, data_lines = parse_comment_headers(file_path)
+    metadata, data_lines = _parse_comment_headers(file_path)
     
     if not data_lines:
         return pd.DataFrame(), metadata
     
     # Create a temporary file-like object from data lines
-    from io import StringIO
     data_content = '\n'.join(data_lines)
     df = pd.read_csv(StringIO(data_content), sep='\t')
     df.columns = [str(c).strip() for c in df.columns]
@@ -104,7 +102,7 @@ def parse_tsv_with_comments(file_path: str | Path) -> Tuple[pd.DataFrame, Dict[s
     return df, metadata
 
 
-def parse_tsv_file(file_path: str | Path) -> pd.DataFrame:
+def _parse_tsv_file(file_path: str | Path) -> pd.DataFrame:
     """
     Parse a TSV file with standardized error handling.
     
@@ -120,7 +118,7 @@ def parse_tsv_file(file_path: str | Path) -> pd.DataFrame:
     return df
 
 
-def cached_loader(cache_key: str, data_folder: str | Path, 
+def _cached_loader(cache_key: str, data_folder: str | Path, 
                   load_function: Callable[[], T]) -> T:
     """
     Simple caching mechanism for data loading.
@@ -134,8 +132,10 @@ def cached_loader(cache_key: str, data_folder: str | Path,
         Data from cache or freshly loaded
     """
     data_dir = Path(data_folder)
-    cache_file = Path(CACHE_DIR) / f"{cache_key}.pkl"
-    cache_time_file = Path(CACHE_DIR) / f"{cache_key}_time.pkl"
+    cache_dir = Path(CACHE_DIR)
+    cache_dir.mkdir(exist_ok=True)
+    cache_file = cache_dir / f"{cache_key}.pkl"
+    cache_time_file = cache_dir / f"{cache_key}_time.pkl"
     
     # Check if cache exists and is newer than source files
     cache_valid = False
@@ -169,7 +169,6 @@ def cached_loader(cache_key: str, data_folder: str | Path,
             pickle.dump(data, f)
             
         # Save current timestamp
-        import time
         with open(cache_time_file, 'wb') as f:
             pickle.dump(time.time(), f)
     except Exception:
@@ -196,7 +195,7 @@ def create_empty_reflector_collection() -> ReflectorCollection:
         reflector_matrix=np.empty((0, len(INTERP_GRID)))
     )
 
-def safely_load_file(path: Path, processor_func: Callable) -> Optional[Any]:
+def _safely_load_file(path: Path, processor_func: Callable) -> Optional[Any]:
     """
     Load and process a file with standardized error handling.
     
@@ -223,7 +222,7 @@ def _process_filter_file(path: Path) -> Optional[Tuple[dict, np.ndarray, np.ndar
     Returns:
         Tuple of (metadata, transmission, mask, filter) or None if invalid
     """
-    df = parse_tsv_file(path)
+    df = _parse_tsv_file(path)
     
     # Check if file has required columns
     if TSV_COLUMNS['wavelength'] not in df.columns or TSV_COLUMNS['transmittance'] not in df.columns:
@@ -252,7 +251,7 @@ def _process_filter_file(path: Path) -> Optional[Tuple[dict, np.ndarray, np.ndar
         transmittance /= 100.0
     
     # Interpolate to standard grid
-    interp_vals = interpolate_to_standard_grid(wavelengths, transmittance)
+    interp_vals = _interpolate_to_standard_grid(wavelengths, transmittance)
     extrap_mask = (INTERP_GRID > 700) if is_lee else np.zeros_like(INTERP_GRID, dtype=bool)
     
     metadata = {
@@ -289,7 +288,7 @@ def _load_filter_collection_from_files() -> FilterCollection:
     filters = []
     
     for path in files:
-        result = safely_load_file(path, _process_filter_file)
+        result = _safely_load_file(path, _process_filter_file)
         if result:
             metadata, transmission, mask, filter_obj = result
             meta_list.append(metadata)
@@ -325,7 +324,7 @@ def load_filter_collection() -> FilterCollection:
     
     # Load data using cache wrapper
     try:
-        cached_data = cached_loader(
+        cached_data = _cached_loader(
             cache_key="filter_data",
             data_folder=DATA_FOLDERS['filters'],
             load_function=_create_cached_data
@@ -354,7 +353,7 @@ def _process_qe_file(path: Path) -> Optional[Tuple[str, Dict[str, np.ndarray], b
     Returns:
         Tuple of (sensor_key, channel_data, is_default) or None if invalid
     """
-    df = parse_tsv_file(path)
+    df = _parse_tsv_file(path)
     
     # Check if file has required columns
     if 'Wavelength' not in df.columns or not any(col in df.columns for col in ['R', 'G', 'B']):
@@ -411,7 +410,7 @@ def _load_quantum_efficiencies_from_files() -> Tuple[List[str], Dict[str, Dict[s
     default_key = None
 
     for path in files:
-        result = safely_load_file(path, _process_qe_file)
+        result = _safely_load_file(path, _process_qe_file)
         if result:
             key, channel_data, is_default = result
             qe_dict[key] = channel_data
@@ -423,7 +422,7 @@ def _load_quantum_efficiencies_from_files() -> Tuple[List[str], Dict[str, Dict[s
 
 def load_quantum_efficiencies() -> Tuple[List[str], Dict[str, Dict[str, np.ndarray]], Optional[str]]:
     """Load quantum efficiency data for camera sensors."""
-    return cached_loader(
+    return _cached_loader(
         cache_key="qe_data",
         data_folder=DATA_FOLDERS['qe'],
         load_function=_load_quantum_efficiencies_from_files
@@ -440,7 +439,7 @@ def _process_illuminant_file(path: Path) -> Optional[Tuple[str, np.ndarray, Opti
     Returns:
         Tuple of (name, interpolated_data, description) or None if invalid
     """
-    df = parse_tsv_file(path)
+    df = _parse_tsv_file(path)
     
     if df.shape[1] < 2:
         return None
@@ -450,7 +449,7 @@ def _process_illuminant_file(path: Path) -> Optional[Tuple[str, np.ndarray, Opti
     power = df.iloc[:, 1].astype(float).values
     
     # Interpolate to standard grid
-    interp = interpolate_to_standard_grid(wl, power)
+    interp = _interpolate_to_standard_grid(wl, power)
     name = path.stem
     
     # Extract description if available
@@ -474,7 +473,7 @@ def _load_illuminant_collection_from_files() -> Tuple[Dict[str, np.ndarray], Dic
     illum, meta = {}, {}
     
     for path in folder.glob('*.tsv'):
-        result = safely_load_file(path, _process_illuminant_file)
+        result = _safely_load_file(path, _process_illuminant_file)
         if result:
             name, interp, description = result
             illum[name] = interp
@@ -486,7 +485,7 @@ def _load_illuminant_collection_from_files() -> Tuple[Dict[str, np.ndarray], Dic
 
 def load_illuminant_collection() -> Tuple[Dict[str, np.ndarray], Dict[str, str]]:
     """Load illuminant collection."""
-    return cached_loader(
+    return _cached_loader(
         cache_key="illuminants",
         data_folder=DATA_FOLDERS['illuminants'],
         load_function=_load_illuminant_collection_from_files
@@ -504,7 +503,7 @@ def _process_reflector_file(path: Path) -> Optional[Tuple[str, np.ndarray, Dict[
         Tuple of (name, interpolated_data, metadata_dict) or None if invalid
     """
     try:
-        df, metadata = parse_tsv_with_comments(path)
+        df, metadata = _parse_tsv_with_comments(path)
     except Exception:
         return None
     
@@ -553,7 +552,7 @@ def _process_reflector_file(path: Path) -> Optional[Tuple[str, np.ndarray, Dict[
     refl = refl[valid_mask]
     
     # Interpolate to standard grid
-    interp_vals = interpolate_to_standard_grid(wl, refl)
+    interp_vals = _interpolate_to_standard_grid(wl, refl)
     
     # Convert from percentage (0-100) to fractional (0-1) scale for internal consistency
     # All spectral data uses 0-1 scale internally
@@ -582,7 +581,7 @@ def _load_reflector_collection_from_files() -> ReflectorCollection:
     meta_list = []
 
     for path in files:
-        result = safely_load_file(path, _process_reflector_file)
+        result = _safely_load_file(path, _process_reflector_file)
         if result:
             name, interp_vals, metadata = result
             reflectors.append(ReflectorSpectrum(name=name, values=interp_vals, metadata=metadata))
@@ -614,7 +613,7 @@ def _load_reflector_collection_from_files() -> ReflectorCollection:
 
 def load_reflector_collection() -> ReflectorCollection:
     """Load reflector collection."""
-    return cached_loader(
+    return _cached_loader(
         cache_key="reflectors",
         data_folder=DATA_FOLDERS['reflectors'],
         load_function=_load_reflector_collection_from_files

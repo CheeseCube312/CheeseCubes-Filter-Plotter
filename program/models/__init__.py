@@ -11,7 +11,6 @@ from models.core import (
     # Filter Models
     Filter,
     FilterCollection,
-    TargetProfile,
     
     # Channel Mixer
     ChannelMixerSettings,
@@ -20,10 +19,6 @@ from models.core import (
     ReflectorSpectrum,
     ReflectorCollection,
     
-    # Report/Chart Configuration
-    ReportConfig,
-    FilterData,
-    ComputationFunctions,
-    SensorData,
-    ChartConfig
+    # Application Data
+    AppData,
 )

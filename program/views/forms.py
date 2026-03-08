@@ -1,653 +1,597 @@
 """
-Form-based UI components for FS FilterLab.
+Forms for FS FilterLab.
 
-This module provides UI components for forms, including search and import interfaces.
+Advanced filter search, advanced reflector search, and import dialogs.
 """
-# Third-party imports
-import streamlit as st
-import pandas as pd
-import numpy as np
-from typing import Dict, List, Tuple, Any, Optional
+import functools
+import io
+import logging
+import os
+import tempfile
+from typing import Callable, Dict, List, Tuple
 
-# Local imports
-from models.constants import INTERP_GRID, UI_BUTTONS, UI_WARNING_MESSAGES, OUTPUT_FOLDERS
-from views.ui_utils import is_dark_color, is_valid_hex_color, handle_error, render_filter_card
+import numpy as np
+import pandas as pd
+from nicegui import ui, events
+
+from models.constants import (
+    INTERP_GRID, UI_BUTTONS, UI_LABELS, UI_SECTIONS, UI_WARNING_MESSAGES,
+    OUTPUT_FOLDERS, IMPORT_TABS, IMPORT_DATA_TYPES, IMPORT_CATEGORIES,
+    IMPORT_ECOSIS_MODES,
+)
+from views.ui_utils import (
+    is_dark_color, is_valid_hex_color, handle_error,
+    show_success_message,
+)
 from services.visualization import create_sparkline_plot
 
-# Cache the sparkline plot to improve performance when toggling filter details
-@st.cache_data
-def cached_create_sparkline_plot(wavelengths, transmission, color):
-    """Cached version of create_sparkline_plot to improve performance."""
-    return create_sparkline_plot(wavelengths, transmission, color=color)
+logger = logging.getLogger(__name__)
 
 
-# -- Helper Functions -----------------------------------------
+# ============================================================================
+# HELPERS
+# ============================================================================
 
-def _handle_import_result(success: bool, message: str, success_msg: str = "Imported successfully!") -> None:
-    """Handle import result with consistent UI feedback."""
-    if success:
-        st.success(success_msg)
-        st.rerun()
-    else:
-        st.error(f"Import failed: {message}")
-
-
-def _cleanup_search_state(prefix: str, indices) -> None:
-    """Clean up session state keys for a search interface."""
-    for idx in indices:
-        st.session_state.pop(f"{prefix}_sel_{idx}", None)
-        st.session_state.pop(f"{prefix}_toggle_{idx}", None)
+@functools.lru_cache(maxsize=512)
+def _cached_sparkline(wl_tuple, trans_tuple, color: str, height: int, width: int):
+    """LRU-cached sparkline (tuples are hashable)."""
+    return create_sparkline_plot(
+        np.array(wl_tuple), np.array(trans_tuple), color=color,
+        height=height, width=width,
+    )
 
 
-# -- Filter & Sort Utilities -----------------------------------------
+def _sparkline_fig(wavelengths, transmission, color, height=150, width=300):
+    return _cached_sparkline(tuple(wavelengths), tuple(transmission), color, height, width)
 
-def filter_by_manufacturer(df: pd.DataFrame, manufacturers: List[str]) -> pd.DataFrame:
-    """
-    Filter DataFrame by manufacturer names.
-    
-    Args:
-        df: DataFrame to filter
-        manufacturers: List of manufacturer names
-        
-    Returns:
-        Filtered DataFrame
-    """
+
+def _filter_by_manufacturer(df: pd.DataFrame, manufacturers: List[str]) -> pd.DataFrame:
     return df if not manufacturers else df[df["Manufacturer"].isin(manufacturers)]
 
 
-def filter_by_trans_at_wavelength(
-    df: pd.DataFrame,
-    interp_grid: np.ndarray,
-    matrix: np.ndarray,
-    wavelength: int,
-    min_t: float = 0.0,
-    max_t: float = 1.0,
+def _filter_by_trans_at_wavelength(
+    df: pd.DataFrame, interp_grid: np.ndarray, matrix: np.ndarray,
+    wavelength: int, min_t: float = 0.0, max_t: float = 1.0,
 ) -> Tuple[pd.DataFrame, np.ndarray]:
-    """
-    Filter DataFrame by transmission at a specific wavelength.
-    
-    Args:
-        df: DataFrame of filters
-        interp_grid: Wavelength grid
-        matrix: Transmission matrix
-        wavelength: Target wavelength
-        min_t: Minimum transmission (0-1)
-        max_t: Maximum transmission (0-1)
-        
-    Returns:
-        Tuple of (filtered DataFrame, transmission values)
-    """
     idx = np.where(interp_grid == wavelength)[0]
     if idx.size == 0:
-        handle_error(f"Wavelength {wavelength} nm not in interpolation grid")
         return df, np.zeros(len(df))
-    selected_index = idx[0]
-
-    # Make sure we're filtering the correct rows in the matrix
-    df_indices = df.index.to_numpy()
-    transmission_values = matrix[df_indices, selected_index]
-
-    transmission_mask = (transmission_values >= min_t) & (transmission_values <= max_t)
-
-    return df.iloc[transmission_mask], transmission_values[transmission_mask]
+    si = idx[0]
+    di = df.index.to_numpy()
+    tv = matrix[di, si]
+    mask = (tv >= min_t) & (tv <= max_t)
+    return df.iloc[mask], tv[mask]
 
 
-def sort_by_hex_rainbow(df: pd.DataFrame, hex_col: str = "Hex Color") -> pd.DataFrame:
-    """
-    Sort DataFrame by hex color in rainbow order.
-    
-    Args:
-        df: DataFrame to sort
-        hex_col: Name of the hex color column
-        
-    Returns:
-        Sorted DataFrame
-    """
+# ============================================================================
+# ADVANCED FILTER SEARCH
+# ============================================================================
+
+def render_advanced_filter_search(
+    df: pd.DataFrame,
+    filter_matrix: np.ndarray,
+    app_state,
+    on_change: Callable,
+) -> None:
+    """Render the advanced filter search panel."""
+
+    with ui.card().classes("w-full"):
+        ui.label(UI_SECTIONS["advanced_filter_search"]).classes("text-lg font-bold")
+        ui.label(UI_LABELS["search_by_manufacturer"]).classes("text-sm text-gray-500")
+
+        # Mutable refs for closure-captured control values
+        manufs = [app_state.advanced_search_manufacturers]
+        wl = [app_state.advanced_search_wavelength]
+        tmin = [app_state.advanced_search_trans_min]
+        tmax = [app_state.advanced_search_trans_max]
+        sort = [app_state.advanced_search_sort]
+
+        with ui.row().classes("w-full items-end gap-2"):
+            ui.select(
+                options=sorted(df["Manufacturer"].unique().tolist()),
+                label="Manufacturer",
+                value=app_state.advanced_search_manufacturers,
+                multiple=True,
+                on_change=lambda e: (manufs.__setitem__(0, list(e.value) if e.value else []),
+                                     setattr(app_state, "advanced_search_manufacturers", list(e.value) if e.value else [])),
+            ).props("dense outlined use-chips").classes("flex-grow")
+
+            ui.number(
+                label="λ (nm)", value=app_state.advanced_search_wavelength, min=300, max=1100, step=5,
+                on_change=lambda e: (wl.__setitem__(0, int(e.value)),
+                                     setattr(app_state, "advanced_search_wavelength", int(e.value))),
+            ).props("dense outlined").style("width:100px")
+
+            ui.number(
+                label="Trans min %", value=app_state.advanced_search_trans_min, min=0, max=100, step=1,
+                on_change=lambda e: (tmin.__setitem__(0, int(e.value)),
+                                     setattr(app_state, "advanced_search_trans_min", int(e.value))),
+            ).props("dense outlined").style("width:100px")
+
+            ui.number(
+                label="Trans max %", value=app_state.advanced_search_trans_max, min=0, max=100, step=1,
+                on_change=lambda e: (tmax.__setitem__(0, int(e.value)),
+                                     setattr(app_state, "advanced_search_trans_max", int(e.value))),
+            ).props("dense outlined").style("width:100px")
+
+            ui.select(
+                options=["Filter Number", "Filter Name", "Hex-Rainbow", "Trans @ λ"],
+                label="Sort by", value=app_state.advanced_search_sort,
+                on_change=lambda e: (sort.__setitem__(0, e.value),
+                                     setattr(app_state, "advanced_search_sort", e.value)),
+            ).props("dense outlined").style("width:160px")
+
+            ui.button(UI_BUTTONS["apply"], on_click=lambda: _apply_filter_search(
+                df, filter_matrix, app_state, on_change, results_container,
+                manufs[0], wl[0], tmin[0], tmax[0], sort[0],
+            )).props("dense")
+
+        results_container = ui.column().classes("w-full mt-2")
+
+        # Initial search - use saved state
+        _apply_filter_search(
+            df, filter_matrix, app_state, on_change, results_container,
+            app_state.advanced_search_manufacturers, app_state.advanced_search_wavelength,
+            app_state.advanced_search_trans_min, app_state.advanced_search_trans_max,
+            app_state.advanced_search_sort,
+        )
+
+def _apply_filter_search(
+    df, filter_matrix, app_state, on_change, results_container,
+    manufs, wl, tmin, tmax, sort_choice,
+):
+    """Execute filter search and populate results container."""
     import colorsys
-    
-    def hex_to_hsl(hex_str):
-        hex_str = hex_str.lstrip('#')
-        try:
-            r, g, b = (int(hex_str[i:i+2], 16)/255.0 for i in (0, 2, 4))
-            h, l, s = colorsys.rgb_to_hls(r, g, b)
-            return (h, s, l)
-        except (ValueError, IndexError):
-            return (0, 0, 0)
 
-    valid_mask = df[hex_col].apply(is_valid_hex_color)
-    invalid_rows = df[~valid_mask]
-    if not invalid_rows.empty:
-        st.warning(UI_WARNING_MESSAGES['invalid_hex_colors'].format(count=len(invalid_rows)))
-        st.dataframe(invalid_rows[[hex_col, "Filter Number", "Filter Name", "Manufacturer"]])
-
-    hsl_df = df[hex_col].apply(hex_to_hsl).apply(pd.Series)
-    hsl_df.columns = ["_hue", "_sat", "_lit"]
-    df_sorted = pd.concat([df, hsl_df], axis=1).sort_values(by=["_hue", "_sat", "_lit"])
-    return df_sorted.drop(columns=["_hue", "_sat", "_lit"])
-
-
-def sort_by_trans_at_wavelength(df: pd.DataFrame, trans_vals: np.ndarray, ascending: bool = False) -> pd.DataFrame:
-    """
-    Sort DataFrame by transmission values.
-    
-    Args:
-        df: DataFrame to sort
-        trans_vals: Transmission values
-        ascending: Whether to sort in ascending order
-        
-    Returns:
-        Sorted DataFrame
-    """
-    temp = df.copy()
-    temp["_t"] = trans_vals
-    return temp.sort_values(by="_t", ascending=ascending).drop(columns=["_t"])
-
-
-# -- Advanced Search UI -----------------------------------------
-
-def advanced_filter_search(df: pd.DataFrame, filter_matrix: np.ndarray) -> None:
-    """
-    Display advanced filter search interface with multiple filter criteria.
-    
-    Args:
-        df: DataFrame containing filter metadata
-        filter_matrix: Matrix of filter transmission data
-    """
-    # Check if advanced search is enabled (controlled by sidebar toggle)
-    if not st.session_state.get("show_advanced_search", False):
-        return
-
-    st.markdown("### Advanced Filter Search")
-    st.markdown("Use the controls below to search by manufacturer, color, or spectral transmittance.")
-
-    with st.form("adv_search_form"):
-        cols = st.columns([2, 1, 2, 2, 1])
-        manufs = cols[0].multiselect("Manufacturer", df["Manufacturer"].unique())
-        wl = cols[1].number_input("λ (nm)", 300, 1100, 550, 5)
-        tmin, tmax = cols[2].slider("Transmittance range (%)", 0, 100, (0, 100), step=1)
-        sort_choice = cols[3].selectbox("Sort by", [
-            "Filter Number", "Filter Name", "Hex‑Rainbow", f"Trans @ {wl} nm"
-        ])
-        with cols[4]:
-            st.markdown("<div style='margin-top: 28px'></div>", unsafe_allow_html=True)
-            apply_clicked = st.form_submit_button(UI_BUTTONS['apply'])
-
-    if apply_clicked:
-        st.session_state.update({
-            "filters_applied": True,
-            "manufs": manufs,
-            "wl": wl,
-            "tmin": tmin,
-            "tmax": tmax,
-            "sort_choice": sort_choice
-        })
-
-    manufs = st.session_state.get("manufs", [])
-    wl = st.session_state.get("wl", 550)
-    tmin = st.session_state.get("tmin", 0)
-    tmax = st.session_state.get("tmax", 100)
-    sort_choice = st.session_state.get("sort_choice", "Filter Number")
-
-    filters_by_manufacturer = filter_by_manufacturer(df, manufs)
-    filtered_results, transmission_values = filter_by_trans_at_wavelength(
-        filters_by_manufacturer, INTERP_GRID, filter_matrix, wl, tmin / 100, tmax / 100
+    filtered = _filter_by_manufacturer(df, manufs)
+    filtered, tv = _filter_by_trans_at_wavelength(
+        filtered, INTERP_GRID, filter_matrix, wl, tmin / 100, tmax / 100,
     )
 
-    if sort_choice == "Hex‑Rainbow":
-        sorted_filters = sort_by_hex_rainbow(filtered_results)
-    elif sort_choice.startswith("Trans @"):
-        sorted_filters = sort_by_trans_at_wavelength(filtered_results, transmission_values)
+    # Sort
+    if sort_choice == "Hex-Rainbow":
+        def _hsl(h):
+            h = h.lstrip("#")
+            try:
+                r, g, b = (int(h[i:i+2], 16) / 255.0 for i in (0, 2, 4))
+                return colorsys.rgb_to_hls(r, g, b)
+            except Exception:
+                return (0, 0, 0)
+        tmp = filtered.copy()
+        tmp["_hue"] = tmp["Hex Color"].apply(lambda x: _hsl(x)[0])
+        filtered = tmp.sort_values("_hue").drop(columns=["_hue"])
+    elif sort_choice.startswith("Trans"):
+        tmp = filtered.copy()
+        tmp["_t"] = tv
+        filtered = tmp.sort_values("_t", ascending=False).drop(columns=["_t"])
     elif sort_choice == "Filter Name":
-        sorted_filters = filtered_results.sort_values("Filter Name")
+        filtered = filtered.sort_values("Filter Name")
     else:
-        sorted_filters = filtered_results.sort_values("Filter Number")
+        filtered = filtered.sort_values("Filter Number")
 
-    st.markdown("---")
-    st.write(f"**{len(sorted_filters)} filters found:**")
+    results_container.clear()
+    with results_container:
+        ui.label(f"{len(filtered)} filters found").classes("font-bold text-sm")
+        ui.separator()
 
-    for idx, row in sorted_filters.iterrows():
-        hex_color = row["Hex Color"]
-        if not is_valid_hex_color(hex_color):
-            hex_color = "#888888"
+        selected_indices = set()
 
-        number = row["Filter Number"]
-        name = row["Filter Name"]
-        brand = row["Manufacturer"]
+        for row_idx, row in filtered.iterrows():
+            hex_c = row["Hex Color"]
+            if not is_valid_hex_color(hex_c):
+                hex_c = "#888888"
+            name = row["Filter Name"]
+            number = row["Filter Number"]
+            brand = row["Manufacturer"]
+            text_color = "#fff" if is_dark_color(hex_c) else "#111"
 
-        with st.container():
-            cols = st.columns([6, 1])
-            with cols[0]:
-                render_filter_card(hex_color, f"{number} — {name} — {brand}")
+            # Mutable holder so the toggle closure can reference the detail
+            # column that is created *after* the colored row element.
+            dc_holder = [None]
 
-            toggle_key = f"filter_toggle_{idx}"
-            with cols[1]:
-                show_details = st.toggle("Details", key=toggle_key, label_visibility="collapsed")
+            def _make_detail_toggle(dc_h=dc_holder, ri=row_idx, hc=hex_c):
+                rendered = [False]
+                def _toggle(e):
+                    dc = dc_h[0]
+                    if dc is None:
+                        return
+                    dc.set_visibility(e.value)
+                    if e.value and not rendered[0]:
+                        rendered[0] = True
+                        with dc:
+                            fig = _sparkline_fig(INTERP_GRID, filter_matrix[ri, :], hc, height=280, width=900)
+                            ui.plotly(fig).classes("w-full")
 
-            if show_details:
-                # Use cached version to prevent regenerating the plot on every rerun
-                fig = cached_create_sparkline_plot(INTERP_GRID, filter_matrix[idx, :], color=hex_color)
-                st.plotly_chart(fig, width='content')
-                st.checkbox("Select this filter", key=f"adv_sel_{idx}")
+                            def _make_sel(idx=ri):
+                                def _t(ev):
+                                    if ev.value:
+                                        selected_indices.add(idx)
+                                    else:
+                                        selected_indices.discard(idx)
+                                return _t
+                            ui.checkbox("Select this filter", on_change=_make_sel(ri)).props("dense")
+                return _toggle
 
-    st.markdown("---")
-    col_done, col_cancel = st.columns([1, 1])
-    with col_done:
-        if st.button(UI_BUTTONS['done']):
-            selected_idxs = [
-                idx for idx in sorted_filters.index
-                if st.session_state.get(f"adv_sel_{idx}", False)
-            ]
-            selected_display = [
-                f"{sorted_filters.loc[idx, 'Filter Name']} "
-                f"({sorted_filters.loc[idx, 'Filter Number']}, "
-                f"{sorted_filters.loc[idx, 'Manufacturer']})"
-                for idx in selected_idxs
-            ]
+            # Colored header row — full-width background matches filter hex color
+            with ui.row().classes("w-full items-center gap-2 py-1 px-2").style(
+                f"background-color:{hex_c};border-radius:6px"
+            ):
+                ui.label(f"{number} — {name} — {brand}").classes(
+                    "flex-grow text-sm font-semibold"
+                ).style(f"color:{text_color}")
+                ui.switch("Details", on_change=_make_detail_toggle()).props("dense").style(
+                    f"color:{text_color}"
+                )
 
-            st.session_state["_pending_selected_filters"] = selected_display
-            st.session_state["_close_advanced_search"] = True
-            _cleanup_search_state("adv", sorted_filters.index)
-            _cleanup_search_state("filter", sorted_filters.index)
-            st.rerun()
+            # Detail container lives outside (below) the colored row
+            dc = ui.column().classes("w-full gap-1")
+            dc.set_visibility(False)
+            dc_holder[0] = dc
 
-    with col_cancel:
-        if st.button(UI_BUTTONS['cancel']):
-            st.session_state["_close_advanced_search"] = True
-            _cleanup_search_state("adv", sorted_filters.index)
-            _cleanup_search_state("filter", sorted_filters.index)
-            st.rerun()
+        ui.separator()
+        with ui.row().classes("gap-2"):
+            def _done():
+                sel_display = [
+                    f"{filtered.loc[i, 'Filter Name']} "
+                    f"({filtered.loc[i, 'Filter Number']}, "
+                    f"{filtered.loc[i, 'Manufacturer']})"
+                    for i in selected_indices if i in filtered.index
+                ]
+                existing = list(app_state.selected_filters)
+                app_state.selected_filters = list(set(existing + sel_display))
+                app_state.show_advanced_search = False
+                on_change()
+
+            ui.button(UI_BUTTONS["done"], on_click=_done).props("dense")
+            ui.button(
+                UI_BUTTONS["cancel"],
+                on_click=lambda: (setattr(app_state, "show_advanced_search", False), on_change()),
+            ).props("dense flat")
 
 
-# -- Advanced Reflector Search UI -----------------------------------------
+# ============================================================================
+# ADVANCED REFLECTOR SEARCH
+# ============================================================================
 
-def filter_reflectors_by_column(df: pd.DataFrame, column: str, values: List[str]) -> pd.DataFrame:
-    """Filter DataFrame by values in a column."""
-    if not values:
-        return df
-    return df[df[column].isin(values)]
+def render_advanced_reflector_search(
+    df: pd.DataFrame,
+    reflector_matrix: np.ndarray,
+    app_state,
+    on_change: Callable,
+) -> None:
+    """Render the advanced reflector search panel."""
 
+    with ui.card().classes("w-full"):
+        ui.label(UI_SECTIONS["advanced_reflector_search"]).classes("text-lg font-bold")
+        ui.label(UI_LABELS["filter_reflectors"]).classes("text-sm text-gray-500")
 
-def advanced_reflector_search(df: pd.DataFrame, reflector_matrix: np.ndarray, app_state) -> None:
-    """
-    Display advanced reflector search interface with progressive filtering.
-    
-    Args:
-        df: DataFrame containing reflector metadata
-        reflector_matrix: Matrix of reflector spectral data
-        app_state: Application state manager for default list management
-    """
-    if not st.session_state.get("show_reflector_search", False):
-        return
-
-    st.markdown("### Advanced Reflector Search")
-    st.markdown("Filter reflectors by metadata, then add to your default list.")
-
-    with st.form("refl_search_form"):
-        cols = st.columns([2, 2, 2, 1])
-        
-        # Get unique values for each filter column (only non-empty)
         orgs = sorted([x for x in df["Organization"].unique() if x])
         packages = sorted([x for x in df["Package Title"].unique() if x])
         targets = sorted([x for x in df["Target Type"].unique() if x])
-        
-        selected_orgs = cols[0].multiselect("Organization", orgs)
-        selected_packages = cols[1].multiselect("Package/Dataset", packages)
-        selected_targets = cols[2].multiselect("Target Type", targets)
-        
-        with cols[3]:
-            st.markdown("<div style='margin-top: 28px'></div>", unsafe_allow_html=True)
-            apply_clicked = st.form_submit_button(UI_BUTTONS['apply'])
 
-    if apply_clicked:
-        st.session_state.update({
-            "refl_filters_applied": True,
-            "refl_orgs": selected_orgs,
-            "refl_packages": selected_packages,
-            "refl_targets": selected_targets
-        })
+        sel_orgs = [[]];  sel_pkgs = [[]];  sel_tgts = [[]]
 
-    # Get filter state
-    selected_orgs = st.session_state.get("refl_orgs", [])
-    selected_packages = st.session_state.get("refl_packages", [])
-    selected_targets = st.session_state.get("refl_targets", [])
+        with ui.row().classes("w-full items-end gap-2"):
+            ui.select(
+                options=orgs, label="Organization", multiple=True,
+                on_change=lambda e: sel_orgs.__setitem__(0, list(e.value) if e.value else []),
+            ).props("dense outlined use-chips").classes("flex-grow")
+            ui.select(
+                options=packages, label="Package/Dataset", multiple=True,
+                on_change=lambda e: sel_pkgs.__setitem__(0, list(e.value) if e.value else []),
+            ).props("dense outlined use-chips").classes("flex-grow")
+            ui.select(
+                options=targets, label="Target Type", multiple=True,
+                on_change=lambda e: sel_tgts.__setitem__(0, list(e.value) if e.value else []),
+            ).props("dense outlined use-chips").classes("flex-grow")
 
-    # Apply progressive filtering
+            ui.button(UI_BUTTONS["apply"], on_click=lambda: _apply_reflector_search(
+                df, reflector_matrix, app_state, on_change, refl_results,
+                sel_orgs[0], sel_pkgs[0], sel_tgts[0],
+            )).props("dense")
+
+        refl_results = ui.column().classes("w-full mt-2")
+
+        _apply_reflector_search(df, reflector_matrix, app_state, on_change, refl_results, [], [], [])
+
+        ui.separator()
+        ui.button(
+            UI_BUTTONS["done"],
+            on_click=lambda: (setattr(app_state, "show_reflector_search", False), on_change()),
+        ).props("dense")
+
+
+def _apply_reflector_search(df, reflector_matrix, app_state, on_change, container, orgs, pkgs, tgts):
     filtered = df.copy()
-    if selected_orgs:
-        filtered = filter_reflectors_by_column(filtered, "Organization", selected_orgs)
-    if selected_packages:
-        filtered = filter_reflectors_by_column(filtered, "Package Title", selected_packages)
-    if selected_targets:
-        filtered = filter_reflectors_by_column(filtered, "Target Type", selected_targets)
+    if orgs:
+        filtered = filtered[filtered["Organization"].isin(orgs)]
+    if pkgs:
+        filtered = filtered[filtered["Package Title"].isin(pkgs)]
+    if tgts:
+        filtered = filtered[filtered["Target Type"].isin(tgts)]
 
-    st.markdown("---")
-    st.write(f"**{len(filtered)} reflectors found:**")
+    container.clear()
+    with container:
+        ui.label(f"{len(filtered)} reflectors found").classes("font-bold text-sm")
+        ui.separator()
 
-    # Display filtered results
-    for idx, row in filtered.iterrows():
-        source_file = row["Source File"]
-        is_default = app_state.is_default_reflector(source_file)
-        
-        # Build display info
-        name = row["Name"]
-        org = row["Organization"] or row["Source Folder"]
-        target_type = row["Target Type"]
-        
-        with st.container():
-            cols = st.columns([5, 1, 1])
-            
-            with cols[0]:
-                # Display name and metadata
-                meta_parts = [x for x in [org, target_type] if x]
-                meta_str = " | ".join(meta_parts) if meta_parts else ""
-                
-                st.markdown(f"**{name}**")
-                if meta_str:
-                    st.caption(meta_str)
-            
-            with cols[1]:
-                show_details = st.toggle("Details", key=f"refl_toggle_{idx}", label_visibility="collapsed")
-            
-            with cols[2]:
-                # Add/Remove from defaults button
-                if is_default:
-                    if st.button("✓", key=f"refl_remove_{idx}", help="Remove from defaults"):
-                        app_state.remove_from_default_reflectors(source_file)
-                        st.rerun()
+        for row_idx, row in filtered.iterrows():
+            sf = row["Source File"]
+            is_def = app_state.is_default_reflector(sf)
+            name = row["Name"]
+            org = row.get("Organization", "") or row.get("Source Folder", "")
+            tt = row.get("Target Type", "")
+
+            with ui.row().classes("w-full items-center gap-2 py-1"):
+                with ui.column().classes("flex-grow gap-0"):
+                    ui.label(name).classes("font-medium text-sm")
+                    meta_parts = [x for x in [org, tt] if x]
+                    if meta_parts:
+                        ui.label(" | ".join(meta_parts)).classes("text-xs text-gray-500")
+
+                # Details toggle — lazy-renders sparkline on first open
+                detail_container = ui.column().classes("w-full gap-1")
+                detail_container.set_visibility(False)
+
+                def _make_detail_toggle(dc=detail_container, ri=row_idx):
+                    rendered = [False]
+                    def _toggle(e):
+                        dc.set_visibility(e.value)
+                        if e.value and not rendered[0]:
+                            rendered[0] = True
+                            with dc:
+                                fig = _sparkline_fig(INTERP_GRID, reflector_matrix[ri, :], "#4CAF50")
+                                ui.plotly(fig).classes("w-full").style("height:120px")
+                    return _toggle
+
+                ui.switch("Details", on_change=_make_detail_toggle()).props("dense")
+
+                if is_def:
+                    def _make_rem(s=sf):
+                        def _r():
+                            app_state.remove_from_default_reflectors(s)
+                            on_change()
+                        return _r
+                    ui.button("X", on_click=_make_rem()).props("dense flat size=sm color=negative").tooltip(
+                        "Remove from defaults"
+                    )
                 else:
-                    if st.button("+", key=f"refl_add_{idx}", help="Add to defaults"):
-                        app_state.add_to_default_reflectors(source_file)
-                        st.rerun()
-            
-            if show_details:
-                # Show sparkline
-                fig = cached_create_sparkline_plot(INTERP_GRID, reflector_matrix[idx, :], color="#4CAF50")
-                st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("---")
-    if st.button(UI_BUTTONS['done'], key="refl_search_done"):
-        # Signal that we want to close the search - use a separate state key
-        st.session_state["close_reflector_search"] = True
-        st.rerun()
+                    def _make_add(s=sf):
+                        def _a():
+                            app_state.add_to_default_reflectors(s)
+                            on_change()
+                        return _a
+                    ui.button("+", on_click=_make_add()).props("dense flat size=sm").tooltip(
+                        "Add to defaults"
+                    )
 
 
-# -- Import UI -----------------------------------------
+# ============================================================================
+# IMPORT DIALOG
+# ============================================================================
 
-def import_data_form() -> None:
-    """Display the data import form with tabs for different data types."""
-    st.markdown("---")
-    st.subheader("Import Data")
-    
-    # Create tabs for different import types
-    tab1, tab2, tab3, tab4 = st.tabs(["Filters", "Illuminants", "Camera QE", "Reflectance/ECOSIS"])
-    
-    with tab1:
-        import_filter_tab()
-    
-    with tab2:
-        import_illuminant_tab()
-    
-    with tab3:
-        import_qe_tab()
-    
-    with tab4:
-        import_reflectance_tab()
+def render_import_dialog(app_state, on_change: Callable) -> None:
+    """Render the data import tabs."""
+
+    with ui.card().classes("w-full"):
+        ui.label(UI_SECTIONS["import_data"]).classes("text-lg font-bold")
+
+        with ui.tabs().classes("w-full") as tabs:
+            tab_f = ui.tab(IMPORT_TABS["filters"])
+            tab_i = ui.tab(IMPORT_TABS["illuminants"])
+            tab_q = ui.tab(IMPORT_TABS["camera_qe"])
+            tab_r = ui.tab(IMPORT_TABS["reflectance_ecosis"])
+
+        with ui.tab_panels(tabs).classes("w-full"):
+            with ui.tab_panel(tab_f):
+                _import_filter_panel(on_change)
+            with ui.tab_panel(tab_i):
+                _import_illuminant_panel(on_change)
+            with ui.tab_panel(tab_q):
+                _import_qe_panel(on_change)
+            with ui.tab_panel(tab_r):
+                _import_reflectance_panel(on_change)
 
 
-def import_filter_tab():
-    """Display the filter data import interface."""
+# -- Reusable import helpers --
+
+def _file_upload(label: str) -> List:
+    """Render a CSV upload widget and return mutable [bytes|None, filename] state."""
+    file_state: List = [None, ""]
+
+    def _on_upload(e: events.UploadEventArguments):
+        file_state[0] = e.content.read()
+        file_state[1] = e.name
+
+    ui.upload(label=label, on_upload=_on_upload, auto_upload=True).props(
+        "accept=.csv dense"
+    ).classes("w-full")
+
+    return file_state
+
+def _make_import_button(
+    file_state: List,
+    import_fn: Callable,
+    button_label: str,
+    on_change: Callable,
+    success_message: str,
+    build_args: Callable,
+) -> None:
+    """Create the import button that reads file_state and calls import_fn."""
+    def _import():
+        if file_state[0] is None:
+            handle_error(UI_LABELS["upload_file_first"], "warning")
+            return
+        buf = io.BytesIO(file_state[0])
+        buf.name = file_state[1]
+        args = build_args(buf)
+        success, msg = import_fn(*args)
+        if success:
+            show_success_message(success_message)
+            on_change()
+        else:
+            handle_error(f"Import failed: {msg}")
+
+    ui.button(button_label, on_click=_import).props("dense color=primary")
+
+
+# -- Individual import panels --
+
+def _import_filter_panel(on_change: Callable) -> None:
     from services.importing import import_filter_from_csv
-    
-    uploaded_file = st.file_uploader(
-        "Upload CSV (Wavelength, Transmittance)", 
-        type="csv", 
-        key="filter_upload"
+
+    file_state = _file_upload(UI_LABELS["upload_csv_wl_trans"])
+
+    manufacturer = ui.input("Manufacturer", value="Custom").props("dense outlined")
+    filter_name = ui.input("Filter Name", value="Custom Filter").props("dense outlined")
+    filter_number = ui.input("Filter Number", value="001").props("dense outlined")
+    hex_color = ui.color_input("Color", value="#808080").props("dense outlined")
+
+    def _build_args(buf):
+        meta = {
+            "manufacturer": manufacturer.value.strip(),
+            "filter_name": filter_name.value.strip(),
+            "filter_number": filter_number.value.strip(),
+            "hex_color": hex_color.value or "#808080",
+        }
+        return (buf, meta, True, True)
+
+    _make_import_button(
+        file_state, import_filter_from_csv,
+        UI_BUTTONS["import_filter"], on_change,
+        "Filter imported successfully!", _build_args,
     )
-    
-    if uploaded_file is None:
-        return
-    
-    with st.form("filter_import_form"):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            manufacturer = st.text_input("Manufacturer", value="Custom")
-            filter_name = st.text_input("Filter Name", value="Custom Filter")
-        
-        with col2:
-            filter_number = st.text_input("Filter Number", value="001")
-            hex_color = st.color_picker("Color", value="#808080")
-        
-        submitted = st.form_submit_button("Import Filter", type="primary")
-        
-        if not submitted:
-            return
-        
-        # Validation
-        if not all([manufacturer.strip(), filter_name.strip(), filter_number.strip()]):
-            st.error("All fields are required")
-            return
-        
-        with st.spinner("Importing..."):
-            meta = {
-                "manufacturer": manufacturer.strip(),
-                "filter_name": filter_name.strip(),
-                "filter_number": filter_number.strip(),
-                "hex_color": hex_color
-            }
-            success, message = import_filter_from_csv(uploaded_file, meta, True, True)
-            _handle_import_result(success, message, "Filter imported successfully!")
 
 
-def import_illuminant_tab():
-    """Illuminant import interface."""
+def _import_illuminant_panel(on_change: Callable) -> None:
     from services.importing import import_illuminant_from_csv
-    
-    uploaded_file = st.file_uploader(
-        "Upload CSV (Wavelength, Power)", 
-        type="csv", 
-        key="illuminant_upload"
+
+    file_state = _file_upload(UI_LABELS["upload_csv_wl_power"])
+
+    name_input = ui.input("Illuminant Name", value="Custom Illuminant").props("dense outlined")
+
+    _make_import_button(
+        file_state, import_illuminant_from_csv,
+        UI_BUTTONS["import_illuminant"], on_change,
+        "Illuminant imported!",
+        lambda buf: (buf, name_input.value.strip()),
     )
-    
-    if uploaded_file is None:
-        return
-    
-    with st.form("illuminant_import_form"):
-        description = st.text_input("Illuminant Name", value="Custom Illuminant", max_chars=50)
-        submitted = st.form_submit_button("Import Illuminant", type="primary")
-        
-        if not submitted:
-            return
-        
-        if not description.strip():
-            st.error("Illuminant name is required")
-            return
-        
-        with st.spinner("Importing..."):
-            success, message = import_illuminant_from_csv(uploaded_file, description.strip())
-            _handle_import_result(success, message, "Illuminant imported successfully!")
 
 
-def import_qe_tab():
-    """Camera QE import interface."""
+def _import_qe_panel(on_change: Callable) -> None:
     from services.importing import import_qe_from_csv
-    
-    uploaded_file = st.file_uploader(
-        "Upload CSV (Wavelength, R, G, B)", 
-        type="csv", 
-        key="qe_upload"
+
+    file_state = _file_upload(UI_LABELS["upload_csv_wl_rgb"])
+
+    brand = ui.input("Brand", value="Custom").props("dense outlined")
+    model = ui.input("Model", value="Custom Model").props("dense outlined")
+
+    _make_import_button(
+        file_state, import_qe_from_csv,
+        UI_BUTTONS["import_camera_qe"], on_change,
+        "Camera QE imported!",
+        lambda buf: (buf, brand.value.strip(), model.value.strip()),
     )
-    
-    if uploaded_file is None:
-        return
-    
-    with st.form("qe_import_form"):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            brand = st.text_input("Brand", value="Custom")
-        with col2:
-            model = st.text_input("Model", value="Custom Model")
-        
-        submitted = st.form_submit_button("Import Camera QE", type="primary")
-        
-        if not submitted:
-            return
-        
-        if not all([brand.strip(), model.strip()]):
-            st.error("Both brand and model are required")
-            return
-        
-        with st.spinner("Importing..."):
-            success, message = import_qe_from_csv(uploaded_file, brand.strip(), model.strip())
-            _handle_import_result(success, message, "Camera QE imported successfully!")
 
 
-def import_reflectance_tab():
-    """Reflectance/absorption import interface."""
-    import tempfile
-    import os
-    from services.importing import import_reflectance_absorption_from_csv, import_ecosis_csv, get_ecosis_csv_metadata_columns
-    
-    st.subheader("Import Reflectance/Absorption Data")
-    
-    file_type = st.radio(
-        "Select file type:",
-        ["Single Spectrum CSV", "ECOSIS Multi-Spectrum CSV"],
-        help="Choose between importing a single spectrum or multiple spectra from ECOSIS database"
+def _import_reflectance_panel(on_change: Callable) -> None:
+    from services.importing import (
+        import_reflectance_absorption_from_csv,
+        import_ecosis_csv,
+        get_ecosis_csv_metadata_columns,
     )
-    
-    if file_type == "Single Spectrum CSV":
-        _import_single_spectrum_form(import_reflectance_absorption_from_csv)
-    else:
-        _import_ecosis_form(import_ecosis_csv, get_ecosis_csv_metadata_columns)
 
+    ui.label(UI_SECTIONS["import_reflectance_absorption"]).classes("font-bold text-sm")
 
-def _import_single_spectrum_form(import_func):
-    """Single spectrum import form."""
-    st.info("Upload a CSV file with two columns: Wavelength, Reflectance/Absorption")
-    
-    uploaded_file = st.file_uploader("Upload CSV File", type="csv", key="single_spectrum_upload")
-    if uploaded_file is None:
-        return
-    
-    with st.form("single_spectrum_form"):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            name = st.text_input("Spectrum Name", value="Custom Spectrum", max_chars=50)
-            data_type = st.selectbox("Data Type", ["Reflectance", "Absorption"])
-        
-        with col2:
-            category = st.selectbox("Category", ["Plant", "Other"])
-            description = st.text_area("Description (optional)", height=70)
-        
-        submitted = st.form_submit_button("Import Single Spectrum", type="primary")
-        
-        if not submitted:
-            return
-        
-        if not name.strip():
-            st.error("Spectrum name is required")
-            return
-        
-        with st.spinner("Importing spectrum..."):
-            meta = {
-                "name": name.strip(),
-                "data_type": data_type,
-                "category": category,
-                "description": description.strip()
-            }
-            success, message = import_func(uploaded_file, meta, True, True)
-            _handle_import_result(success, message, "Spectrum imported successfully!")
+    # -- Mode containers (only one visible at a time) --
+    single_section = ui.column().classes("w-full gap-2")
+    ecosis_section = ui.column().classes("w-full gap-2")
+    ecosis_section.set_visibility(False)
 
+    def _on_mode_change(e):
+        is_single = "Single" in e.value
+        single_section.set_visibility(is_single)
+        ecosis_section.set_visibility(not is_single)
 
-def _import_ecosis_form(import_func, get_columns_func):
-    """ECOSIS multi-spectrum import form."""
-    import tempfile
-    import os
-    
-    st.info("Upload an ECOSIS database CSV file containing multiple samples with wavelength columns")
-    
-    ecosis_file = st.file_uploader(
-        "Upload ECOSIS CSV File", type="csv", key="ecosis_upload",
-        help="CSV files from the ECOSIS spectral library"
-    )
-    if ecosis_file is None:
-        return
-    
-    # Save to temp file for column detection
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_file:
-        tmp_file.write(ecosis_file.getvalue())
-        tmp_file_path = tmp_file.name
-    
-    metadata_columns = get_columns_func(tmp_file_path)
-    
-    with st.form("ecosis_import_form"):
-        st.write("**Import Settings**")
-        
-        # Column selection
-        name_column = None
-        relevant_metadata_cols = []
-        if metadata_columns:
-            st.write("**Column Selection:**")
-            name_column = st.selectbox(
-                "Choose column for spectrum names:",
-                options=["None"] + metadata_columns, index=0,
-                help="Select which CSV column should be used to name spectra."
-            )
-            name_column = None if name_column == "None" else name_column
-            
-            relevant_metadata_cols = st.multiselect(
-                "Relevant metadata for Surface Color Preview:",
-                options=metadata_columns, default=[],
-                help="Choose which metadata columns should be displayed in Surface Color Preview"
-            )
-        
-        api_url = st.text_input(
-            "ECOSIS API URL (optional, but recommended)",
-            placeholder="https://ecosis.org/api/package/package-name",
-            help="Provide the ECOSIS API URL to include attribution information."
+    ui.radio(
+        IMPORT_ECOSIS_MODES,
+        value=IMPORT_ECOSIS_MODES[0],
+        on_change=_on_mode_change,
+    ).props("dense inline")
+
+    # -- Single spectrum --
+    with single_section:
+        file_state = _file_upload(UI_LABELS["upload_csv"])
+
+        sname = ui.input("Spectrum Name", value="Custom Spectrum").props("dense outlined")
+        stype = ui.select(IMPORT_DATA_TYPES, label="Data Type", value="Reflectance").props("dense outlined")
+        scat = ui.select(IMPORT_CATEGORIES, label="Category", value="Plant").props("dense outlined")
+
+        _make_import_button(
+            file_state, import_reflectance_absorption_from_csv,
+            UI_BUTTONS["import_single_spectrum"], on_change,
+            "Spectrum imported!",
+            lambda buf: (buf, {"name": sname.value.strip(), "data_type": stype.value,
+                               "category": scat.value, "description": ""}, True, True),
         )
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.caption("**Output:** Reflectors/Ecosis/{filename}")
-        with col2:
-            st.caption("**Range:** 300-1100nm interpolated")
-        
-        submitted = st.form_submit_button("Import ECOSIS File", type="primary")
-        
-        if not submitted:
-            return
-        
-        with st.spinner("Processing ECOSIS CSV file..."):
+
+    # -- ECOSIS multi-spectrum --
+    with ecosis_section:
+        ecosis_state: Dict = {"content": None, "name": "", "tmp_path": None, "meta_cols": []}
+        meta_cols_container = ui.column().classes("w-full")
+        name_col = [None]
+        relevant_cols: List = [[]]
+
+        def _up_e(e: events.UploadEventArguments):
+            ecosis_state["content"] = e.content.read()
+            ecosis_state["name"] = e.name
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+                tmp.write(ecosis_state["content"])
+                ecosis_state["tmp_path"] = tmp.name
+            ecosis_state["meta_cols"] = get_ecosis_csv_metadata_columns(ecosis_state["tmp_path"])
+            meta_cols_container.clear()
+            with meta_cols_container:
+                if ecosis_state["meta_cols"]:
+                    ui.label(UI_SECTIONS["column_selection"]).classes("font-bold text-sm")
+                    ui.select(
+                        options=["None"] + ecosis_state["meta_cols"],
+                        label=UI_LABELS["choose_name_column"],
+                        value="None",
+                        on_change=lambda ev: name_col.__setitem__(0, ev.value if ev.value != "None" else None),
+                    ).props("dense outlined").classes("w-full")
+                    ui.select(
+                        options=ecosis_state["meta_cols"],
+                        label=UI_LABELS["relevant_metadata"],
+                        multiple=True,
+                        on_change=lambda ev: relevant_cols.__setitem__(0, list(ev.value) if ev.value else []),
+                    ).props("dense outlined use-chips").classes("w-full")
+
+        ui.upload(label=UI_LABELS["upload_ecosis_csv"], on_upload=_up_e, auto_upload=True).props(
+            "accept=.csv dense"
+        ).classes("w-full")
+        api_url = ui.input(
+            UI_LABELS["ecosis_api_url"], placeholder="https://ecosis.org/api/package/..."
+        ).props("dense outlined").classes("w-full")
+
+        def _import_ecosis():
+            if ecosis_state["tmp_path"] is None:
+                handle_error(UI_LABELS["upload_file_first"], "warning")
+                return
+            csv_fn = os.path.splitext(ecosis_state["name"])[0]
+            csv_fn = "".join(c for c in csv_fn if c.isalnum() or c in " _-").strip().replace(" ", "_")
+            out_dir = os.path.join(OUTPUT_FOLDERS["ecosis"], csv_fn)
+            os.makedirs(out_dir, exist_ok=True)
             try:
-                # Create output folder from CSV filename
-                csv_filename = os.path.splitext(ecosis_file.name)[0]
-                csv_filename = ''.join(c for c in csv_filename if c.isalnum() or c in ' _-').strip().replace(' ', '_')
-                
-                output_dir = os.path.join(OUTPUT_FOLDERS['ecosis'], csv_filename)
-                os.makedirs(output_dir, exist_ok=True)
-                
-                created_files = import_func(
-                    tmp_file_path, output_dir,
-                    api_url.strip() or None,
-                    name_column, relevant_metadata_cols
+                files = import_ecosis_csv(
+                    ecosis_state["tmp_path"], out_dir,
+                    api_url.value.strip() or None,
+                    name_col[0],
+                    relevant_cols[0],
                 )
-                
-                os.unlink(tmp_file_path)  # Clean up
-                
-                st.success(f"Successfully imported {len(created_files)} spectra!")
-                
-                if created_files:
-                    with st.expander("View imported files", expanded=False):
-                        for filepath in created_files[:8]:
-                            st.write(f"- {os.path.basename(filepath)}")
-                        if len(created_files) > 8:
-                            st.write(f"... and {len(created_files) - 8} more files")
-                
-                st.rerun()
-                
-            except Exception as e:
-                st.error(f"ECOSIS import failed: {str(e)}")
+                os.unlink(ecosis_state["tmp_path"])
+                show_success_message(f"Imported {len(files)} spectra!")
+                on_change()
+            except Exception as exc:
+                handle_error(f"ECOSIS import failed: {exc}")
+
+        ui.button(UI_BUTTONS["import_ecosis_file"], on_click=_import_ecosis).props("dense color=primary")
