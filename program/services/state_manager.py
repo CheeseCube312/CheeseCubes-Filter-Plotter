@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
-from models.constants import DEFAULT_WB_GAINS
+from models.constants import DEFAULT_WB_GAINS, MY_FILTERS_FILE
 from models.core import ChannelMixerSettings, Filter
 
 logger = logging.getLogger(__name__)
@@ -63,11 +63,12 @@ class StateManager:
             "show_advanced_search": False,
             "show_import_data": False,
             "show_reflector_search": False,
+            "show_my_filters_manager": False,
+            # My Filters toggle (search only owned)
+            "my_filters_only": False,
             # Advanced filter search state (persists across UI rebuilds)
             "advanced_search_manufacturers": [],
-            "advanced_search_wavelength": 550,
-            "advanced_search_trans_min": 0,
-            "advanced_search_trans_max": 100,
+            "advanced_search_wavelength_criteria": [{"wavelength": 550, "trans_min": 0, "trans_max": 100}],
             "advanced_search_sort": "Filter Number",
             # RGB channel visibility
             "show_R": True,
@@ -137,28 +138,13 @@ class StateManager:
         self._set("advanced_search_manufacturers", value)
 
     @property
-    def advanced_search_wavelength(self) -> int:
-        return self._store.get("advanced_search_wavelength", 550)
+    def advanced_search_wavelength_criteria(self) -> List[Dict]:
+        """List of wavelength criteria, each with {wavelength, trans_min, trans_max}."""
+        return self._store.get("advanced_search_wavelength_criteria", [{"wavelength": 550, "trans_min": 0, "trans_max": 100}])
 
-    @advanced_search_wavelength.setter
-    def advanced_search_wavelength(self, value: int) -> None:
-        self._set("advanced_search_wavelength", value)
-
-    @property
-    def advanced_search_trans_min(self) -> int:
-        return self._store.get("advanced_search_trans_min", 0)
-
-    @advanced_search_trans_min.setter
-    def advanced_search_trans_min(self, value: int) -> None:
-        self._set("advanced_search_trans_min", value)
-
-    @property
-    def advanced_search_trans_max(self) -> int:
-        return self._store.get("advanced_search_trans_max", 100)
-
-    @advanced_search_trans_max.setter
-    def advanced_search_trans_max(self, value: int) -> None:
-        self._set("advanced_search_trans_max", value)
+    @advanced_search_wavelength_criteria.setter
+    def advanced_search_wavelength_criteria(self, value: List[Dict]) -> None:
+        self._set("advanced_search_wavelength_criteria", value)
 
     @property
     def advanced_search_sort(self) -> str:
@@ -497,6 +483,107 @@ class StateManager:
                 source_file = reflector.metadata.get("source_file", "")
                 if source_file and not self.is_default_reflector(source_file):
                     self.add_to_default_reflectors(source_file)
+
+    # ====================================================================
+    # MY FILTERS (OWNED FILTERS) MANAGEMENT
+    # ====================================================================
+
+    _MY_FILTERS_FILE = MY_FILTERS_FILE
+
+    def _load_my_filters_from_file(self) -> List[str]:
+        fp = Path(self._MY_FILTERS_FILE)
+        if fp.exists():
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+                return data.get("my_filters", [])
+            except (json.JSONDecodeError, IOError):
+                return []
+        return []
+
+    def _save_my_filters_to_file(self, filter_names: List[str]) -> None:
+        fp = Path(self._MY_FILTERS_FILE)
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fp.write_text(
+                json.dumps({"my_filters": sorted(filter_names)}, indent=2),
+                encoding="utf-8",
+            )
+        except IOError:
+            pass
+
+    def get_my_filters(self) -> List[str]:
+        if "_my_filters_set" not in self._store:
+            self._store["_my_filters_set"] = set(self._load_my_filters_from_file())
+        return self._store["_my_filters_set"]
+
+    def get_my_filters_count(self) -> int:
+        return len(self.get_my_filters())
+
+    def is_my_filter(self, display_name: str) -> bool:
+        return display_name in self.get_my_filters()
+
+    def add_to_my_filters(self, display_name: str) -> None:
+        current = self.get_my_filters()
+        if display_name not in current:
+            current.add(display_name)
+            self._save_my_filters_to_file(list(current))
+            self._notify("my_filters")
+
+    def remove_from_my_filters(self, display_name: str) -> None:
+        current = self.get_my_filters()
+        if display_name in current:
+            current.discard(display_name)
+            self._save_my_filters_to_file(list(current))
+            self._notify("my_filters")
+
+    def add_manufacturer_to_my_filters(self, manufacturer: str, filter_collection) -> int:
+        """Add all filters from a manufacturer. Returns count added."""
+        added = 0
+        current = self.get_my_filters()
+        for f in filter_collection.filters:
+            name = str(f)
+            if f.manufacturer == manufacturer and name not in current:
+                current.add(name)
+                added += 1
+        if added:
+            self._save_my_filters_to_file(list(current))
+            self._notify("my_filters")
+        return added
+
+    def remove_manufacturer_from_my_filters(self, manufacturer: str, filter_collection) -> int:
+        """Remove all filters from a manufacturer. Returns count removed."""
+        removed = 0
+        current = self.get_my_filters()
+        for f in filter_collection.filters:
+            name = str(f)
+            if f.manufacturer == manufacturer and name in current:
+                current.discard(name)
+                removed += 1
+        if removed:
+            self._save_my_filters_to_file(list(current))
+            self._notify("my_filters")
+        return removed
+
+    def clear_all_my_filters(self) -> None:
+        self._store["_my_filters_set"] = set()
+        self._save_my_filters_to_file([])
+        self._notify("my_filters")
+
+    @property
+    def my_filters_only(self) -> bool:
+        return self._store.get("my_filters_only", False)
+
+    @my_filters_only.setter
+    def my_filters_only(self, value: bool) -> None:
+        self._set("my_filters_only", value)
+
+    @property
+    def show_my_filters_manager(self) -> bool:
+        return self._store.get("show_my_filters_manager", False)
+
+    @show_my_filters_manager.setter
+    def show_my_filters_manager(self, value: bool) -> None:
+        self._set("show_my_filters_manager", value)
 
     # ====================================================================
     # GENERIC STORE ACCESS (for cases where direct key access is needed)

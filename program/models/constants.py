@@ -58,6 +58,9 @@ OUTPUT_FOLDERS = {
     'filter_import': "program/data/filters_data"  # Filter import destination
 }
 
+# Persistent JSON files
+MY_FILTERS_FILE = "program/data/filters_data/my_filters.json"
+
 # =============================================================================
 # TSV FILE STRUCTURE CONSTANTS
 # =============================================================================
@@ -193,6 +196,9 @@ UI_BUTTONS = {
     'import_camera_qe': "Import Camera QE",
     'import_single_spectrum': "Import Single Spectrum",
     'import_ecosis_file': "Import ECOSIS File",
+    'add_all': "Add All",
+    'remove_all': "Remove All",
+    'clear_all_owned': "Clear All Owned Filters",
 }
 
 # Main section and panel titles
@@ -205,12 +211,14 @@ UI_SECTIONS = {
     'show_advanced_search': "Show Advanced Filter Search",
     'show_reflector_search': "Show Reflector Search",
     'show_channel_mixer': "Show Channel Mixer",
+    'show_my_filters_manager': "Manage Owned Filters",
     'sensor_response_channels': "Sensor-Weighted Response Channels",
     'display_options': "Display Options",
     'reflectance_illuminant_curves': "Show Reflectance and Illuminant Curves",
     'default_reflector_list': "Surface Color Preview",
     'advanced_filter_search': "Advanced Filter Search",
     'advanced_reflector_search': "Advanced Reflector Search",
+    'my_filters_manager': "Manage Owned Filters",
     'import_data': "Import Data",
     'ecosis_import': "ECOSIS Import",
     'import_reflectance_absorption': "Import Reflectance/Absorption Data",
@@ -254,6 +262,8 @@ UI_WARNING_MESSAGES = {
     'no_illuminants': "No illuminants found.",
     'invalid_hex_colors': "Found {count} filters with invalid hex color codes:",
     'incomplete_reflector_data': "Some reflector data appears incomplete. Check data files.",
+    'no_owned_filters': "No filters marked as owned. Use \"Manage Owned Filters\" to add filters first.",
+    'unowned_selected': "Selected filter(s) not in owned list:",
 }
 
 UI_SUCCESS_MESSAGES = {

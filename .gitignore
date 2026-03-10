@@ -18,6 +18,10 @@ program/output/
 program/cache/
 program/data/  # Managed as git submodule - should not be tracked here
 
+# Personal user data (not for version control)
+program/data/filters_data/my_filters.json
+program/data/reflectors/default_reflectors.json
+
 # OS
 .DS_Store
 Thumbs.db

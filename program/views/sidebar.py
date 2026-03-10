@@ -15,7 +15,7 @@ from models.constants import (
     UI_INFO_MESSAGES, UI_WARNING_MESSAGES, UI_HELP_TEXT, ACTION_TYPES,
 )
 from models.core import AppData, FilterCollection
-from views.ui_utils import handle_error, stateful_expansion
+from views.ui_utils import handle_error, stateful_expansion, inline_warning
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,11 @@ def _filter_selection_panel(
     Returns the ui.select element so callers can read .value.
     """
     display_names = sorted(filter_collection.get_display_names())
+    
+    # Filter to owned only when toggle is active
+    if app_state.my_filters_only:
+        owned = app_state.get_my_filters()
+        display_names = [n for n in display_names if n in owned]
 
     sel = ui.select(
         options=display_names,
@@ -48,6 +53,41 @@ def _filter_selection_panel(
 def _on_filter_change(e, app_state, on_change: Callable):
     app_state.selected_filters = list(e.value) if e.value else []
     on_change()
+
+
+# ============================================================================
+# MY FILTERS ONLY TOGGLE
+# ============================================================================
+
+def _my_filters_toggle(app_state, filter_collection, on_change: Callable) -> None:
+    """Toggle to restrict filter selection to owned filters only."""
+    owned_count = app_state.get_my_filters_count()
+    total_count = len(filter_collection.filters)
+    
+    def _on_toggle(e):
+        if e.value and owned_count == 0:
+            ui.notify(UI_WARNING_MESSAGES["no_owned_filters"], type="warning")
+            # Keep toggle off
+            return
+        app_state.my_filters_only = e.value
+        on_change()
+    
+    with ui.row().classes("w-full items-center gap-2"):
+        ui.switch(
+            f"Owned Filters Only ({owned_count}/{total_count})",
+            value=app_state.my_filters_only,
+            on_change=_on_toggle,
+        ).props("dense")
+    
+    # Show warning for selected filters not in owned list
+    if app_state.my_filters_only and app_state.selected_filters:
+        owned = app_state.get_my_filters()
+        unowned = [f for f in app_state.selected_filters if f not in owned]
+        if unowned:
+            names = ", ".join(unowned[:5])
+            if len(unowned) > 5:
+                names += f" (+{len(unowned) - 5} more)"
+            inline_warning(f"{UI_WARNING_MESSAGES['unowned_selected']} {names}")
 
 
 # ============================================================================
@@ -167,6 +207,7 @@ def _display_toggles_panel(app_state, on_change: Callable) -> None:
         ("show_advanced_search", None),
         ("show_reflector_search", None),
         ("show_channel_mixer", UI_HELP_TEXT["channel_mixer"]),
+        ("show_my_filters_manager", None),
     ]
     for attr, tooltip in _PANEL_TOGGLES:
         sw = ui.switch(
@@ -290,6 +331,9 @@ def render_sidebar(
 
         # 1. Filter selection
         _filter_selection_panel(filter_collection, app_state, on_change)
+        
+        # My Filters Only toggle
+        _my_filters_toggle(app_state, filter_collection, on_change)
 
         # 2. Filter multipliers
         _filter_multipliers_panel(app_state, on_change)

@@ -141,7 +141,7 @@ def _render_reflector_row(reflector, combined_trans, app_state, on_change) -> No
 
         # WB button (3-state: disabled / active / normal)
         if wb_disabled:
-            ui.button("WB").props("dense flat size=sm disable")
+            ui.button("WB").props("dense outline size=sm disable")
         elif is_active_wb:
             def _make_reset(sf=source_file):
                 def _reset():
@@ -157,7 +157,7 @@ def _render_reflector_row(reflector, combined_trans, app_state, on_change) -> No
                     app_state.set_white_balance_from_surface(r.values, ct, sf)
                     on_change()
                 return _set
-            ui.button("WB", on_click=_make_set_wb()).props("dense flat size=sm").tooltip(
+            ui.button("WB", on_click=_make_set_wb()).props("dense outline size=sm").tooltip(
                 "Set as white balance reference"
             )
 
@@ -167,7 +167,7 @@ def _render_reflector_row(reflector, combined_trans, app_state, on_change) -> No
                 app_state.remove_from_default_reflectors(sf)
                 on_change()
             return _rem
-        ui.button("×", on_click=_make_remove()).props("dense flat size=sm color=negative")
+        ui.button("×", on_click=_make_remove()).props("dense outline size=sm color=negative")
 
 
 # ============================================================================
@@ -281,3 +281,8 @@ def render_main_content(
                 reflector_collection.df, reflector_collection.reflector_matrix,
                 app_state, on_change,
             )
+
+        # My Filters management panel
+        if app_state.show_my_filters_manager:
+            from views.forms import render_my_filters_manager
+            render_my_filters_manager(filter_collection, app_state, on_change)

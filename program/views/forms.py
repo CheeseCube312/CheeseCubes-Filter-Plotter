@@ -63,6 +63,37 @@ def _filter_by_trans_at_wavelength(
     return df.iloc[mask], tv[mask]
 
 
+def _filter_by_multiple_wavelength_criteria(
+    df: pd.DataFrame, interp_grid: np.ndarray, matrix: np.ndarray,
+    criteria: List[Dict],
+) -> pd.DataFrame:
+    """Apply multiple wavelength/transmission criteria with AND logic.
+    
+    Args:
+        df: DataFrame of filters
+        interp_grid: Wavelength grid
+        matrix: Transmission matrix
+        criteria: List of dicts with {wavelength, trans_min, trans_max}
+    
+    Returns:
+        Filtered DataFrame matching ALL criteria
+    """
+    if not criteria:
+        return df
+    
+    # Start with all filters and progressively narrow down
+    filtered_df = df
+    for criterion in criteria:
+        wl = criterion["wavelength"]
+        tmin = criterion["trans_min"] / 100.0  # Convert percentage to 0-1
+        tmax = criterion["trans_max"] / 100.0
+        filtered_df, _ = _filter_by_trans_at_wavelength(
+            filtered_df, interp_grid, matrix, wl, tmin, tmax
+        )
+    
+    return filtered_df
+
+
 # ============================================================================
 # ADVANCED FILTER SEARCH
 # ============================================================================
@@ -73,80 +104,164 @@ def render_advanced_filter_search(
     app_state,
     on_change: Callable,
 ) -> None:
-    """Render the advanced filter search panel."""
+    """Render the advanced filter search panel with multiple wavelength criteria."""
 
     with ui.card().classes("w-full"):
         ui.label(UI_SECTIONS["advanced_filter_search"]).classes("text-lg font-bold")
         ui.label(UI_LABELS["search_by_manufacturer"]).classes("text-sm text-gray-500")
 
-        # Mutable refs for closure-captured control values
-        manufs = [app_state.advanced_search_manufacturers]
-        wl = [app_state.advanced_search_wavelength]
-        tmin = [app_state.advanced_search_trans_min]
-        tmax = [app_state.advanced_search_trans_max]
-        sort = [app_state.advanced_search_sort]
-
+        # Manufacturer filter
         with ui.row().classes("w-full items-end gap-2"):
             ui.select(
                 options=sorted(df["Manufacturer"].unique().tolist()),
                 label="Manufacturer",
                 value=app_state.advanced_search_manufacturers,
                 multiple=True,
-                on_change=lambda e: (manufs.__setitem__(0, list(e.value) if e.value else []),
-                                     setattr(app_state, "advanced_search_manufacturers", list(e.value) if e.value else [])),
+                on_change=lambda e: setattr(app_state, "advanced_search_manufacturers", list(e.value) if e.value else []),
             ).props("dense outlined use-chips").classes("flex-grow")
 
-            ui.number(
-                label="λ (nm)", value=app_state.advanced_search_wavelength, min=300, max=1100, step=5,
-                on_change=lambda e: (wl.__setitem__(0, int(e.value)),
-                                     setattr(app_state, "advanced_search_wavelength", int(e.value))),
-            ).props("dense outlined").style("width:100px")
-
-            ui.number(
-                label="Trans min %", value=app_state.advanced_search_trans_min, min=0, max=100, step=1,
-                on_change=lambda e: (tmin.__setitem__(0, int(e.value)),
-                                     setattr(app_state, "advanced_search_trans_min", int(e.value))),
-            ).props("dense outlined").style("width:100px")
-
-            ui.number(
-                label="Trans max %", value=app_state.advanced_search_trans_max, min=0, max=100, step=1,
-                on_change=lambda e: (tmax.__setitem__(0, int(e.value)),
-                                     setattr(app_state, "advanced_search_trans_max", int(e.value))),
-            ).props("dense outlined").style("width:100px")
-
+        ui.separator().classes("my-2")
+        
+        # Wavelength criteria section
+        # Use a placeholder list to hold results_container reference for callbacks
+        results_container_ref = [None]
+        
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.label("Wavelength Criteria (AND logic)").classes("text-sm font-semibold")
+            ui.button("Add Criterion", on_click=lambda: _add_wavelength_criterion(
+                app_state, criteria_container, df, filter_matrix, on_change, results_container_ref[0]
+            )).props("dense outline size=sm color=primary")
+        
+        criteria_container = ui.column().classes("w-full gap-1")
+        
+        # Render existing criteria
+        with criteria_container:
+            for idx, criterion in enumerate(app_state.advanced_search_wavelength_criteria):
+                _render_criterion_row(
+                    idx, criterion, app_state, criteria_container, 
+                    df, filter_matrix, on_change, results_container_ref
+                )
+        
+        ui.separator().classes("my-2")
+        
+        # Sort and apply
+        with ui.row().classes("w-full items-end gap-2"):
             ui.select(
                 options=["Filter Number", "Filter Name", "Hex-Rainbow", "Trans @ λ"],
                 label="Sort by", value=app_state.advanced_search_sort,
-                on_change=lambda e: (sort.__setitem__(0, e.value),
-                                     setattr(app_state, "advanced_search_sort", e.value)),
+                on_change=lambda e: setattr(app_state, "advanced_search_sort", e.value),
             ).props("dense outlined").style("width:160px")
 
             ui.button(UI_BUTTONS["apply"], on_click=lambda: _apply_filter_search(
-                df, filter_matrix, app_state, on_change, results_container,
-                manufs[0], wl[0], tmin[0], tmax[0], sort[0],
+                df, filter_matrix, app_state, on_change, results_container_ref[0]
             )).props("dense")
 
-        results_container = ui.column().classes("w-full mt-2")
+        ui.separator().classes("my-2")
+        
+        # Results container at the end
+        results_container = ui.column().classes("w-full")
+        results_container_ref[0] = results_container
 
-        # Initial search - use saved state
-        _apply_filter_search(
-            df, filter_matrix, app_state, on_change, results_container,
-            app_state.advanced_search_manufacturers, app_state.advanced_search_wavelength,
-            app_state.advanced_search_trans_min, app_state.advanced_search_trans_max,
-            app_state.advanced_search_sort,
-        )
+        # Initial search with saved state
+        _apply_filter_search(df, filter_matrix, app_state, on_change, results_container)
+
+
+def _render_criterion_row(
+    idx: int, criterion: Dict, app_state, criteria_container, 
+    df, filter_matrix, on_change, results_container_ref
+):
+    """Render a single wavelength criterion row."""
+    with ui.row().classes("w-full items-center gap-2"):
+        ui.number(
+            label="λ (nm)", value=criterion["wavelength"], min=300, max=1100, step=5,
+            on_change=lambda e, i=idx: _update_criterion(i, "wavelength", int(e.value), app_state),
+        ).props("dense outlined").style("width:110px")
+        
+        ui.number(
+            label="Min %", value=criterion["trans_min"], min=0, max=100, step=1,
+            on_change=lambda e, i=idx: _update_criterion(i, "trans_min", int(e.value), app_state),
+        ).props("dense outlined").style("width:90px")
+        
+        ui.number(
+            label="Max %", value=criterion["trans_max"], min=0, max=100, step=1,
+            on_change=lambda e, i=idx: _update_criterion(i, "trans_max", int(e.value), app_state),
+        ).props("dense outlined").style("width:90px")
+        
+        # Show remove button only if more than one criterion
+        if len(app_state.advanced_search_wavelength_criteria) > 1:
+            ui.button("X", on_click=lambda i=idx: _remove_wavelength_criterion(
+                i, app_state, criteria_container, df, filter_matrix, on_change, results_container_ref
+            )).props("dense outline size=sm color=negative").style("width:40px")
+
+
+def _update_criterion(idx: int, field: str, value, app_state):
+    """Update a single field in a wavelength criterion."""
+    criteria = app_state.advanced_search_wavelength_criteria.copy()
+    if 0 <= idx < len(criteria):
+        criteria[idx][field] = value
+        app_state.advanced_search_wavelength_criteria = criteria
+
+
+def _add_wavelength_criterion(app_state, criteria_container, df, filter_matrix, on_change, results_container):
+    """Add a new wavelength criterion."""
+    criteria = app_state.advanced_search_wavelength_criteria.copy()
+    # Default: copy the last criterion's values
+    last = criteria[-1] if criteria else {"wavelength": 550, "trans_min": 0, "trans_max": 100}
+    criteria.append({"wavelength": last["wavelength"], "trans_min": last["trans_min"], "trans_max": last["trans_max"]})
+    app_state.advanced_search_wavelength_criteria = criteria
+    
+    # Re-render criteria rows
+    criteria_container.clear()
+    with criteria_container:
+        for idx, criterion in enumerate(criteria):
+            _render_criterion_row(
+                idx, criterion, app_state, criteria_container,
+                df, filter_matrix, on_change, [results_container]
+            )
+
+
+def _remove_wavelength_criterion(idx: int, app_state, criteria_container, df, filter_matrix, on_change, results_container_ref):
+    """Remove a wavelength criterion."""
+    criteria = app_state.advanced_search_wavelength_criteria.copy()
+    if 0 <= idx < len(criteria) and len(criteria) > 1:  # Keep at least one criterion
+        criteria.pop(idx)
+        app_state.advanced_search_wavelength_criteria = criteria
+        
+        # Re-render criteria rows
+        criteria_container.clear()
+        with criteria_container:
+            for new_idx, criterion in enumerate(criteria):
+                _render_criterion_row(
+                    new_idx, criterion, app_state, criteria_container,
+                    df, filter_matrix, on_change, results_container_ref
+                )
+
 
 def _apply_filter_search(
-    df, filter_matrix, app_state, on_change, results_container,
-    manufs, wl, tmin, tmax, sort_choice,
+    df, filter_matrix, app_state, on_change, results_container
 ):
     """Execute filter search and populate results container."""
     import colorsys
 
-    filtered = _filter_by_manufacturer(df, manufs)
-    filtered, tv = _filter_by_trans_at_wavelength(
-        filtered, INTERP_GRID, filter_matrix, wl, tmin / 100, tmax / 100,
+    # Apply owned-only filter when toggle is active
+    filtered = df
+    if app_state.my_filters_only:
+        owned = app_state.get_my_filters()
+        # Build display names from df columns and filter to owned
+        def _display_name(row):
+            return f"{row['Filter Name']} ({row['Filter Number']}, {row['Manufacturer']})"
+        mask = filtered.apply(lambda row: _display_name(row) in owned, axis=1)
+        filtered = filtered[mask]
+
+    # Apply manufacturer filter
+    filtered = _filter_by_manufacturer(filtered, app_state.advanced_search_manufacturers)
+    
+    # Apply all wavelength criteria (AND logic)
+    filtered = _filter_by_multiple_wavelength_criteria(
+        filtered, INTERP_GRID, filter_matrix, app_state.advanced_search_wavelength_criteria
     )
+    
+    sort_choice = app_state.advanced_search_sort
 
     # Sort
     if sort_choice == "Hex-Rainbow":
@@ -161,9 +276,17 @@ def _apply_filter_search(
         tmp["_hue"] = tmp["Hex Color"].apply(lambda x: _hsl(x)[0])
         filtered = tmp.sort_values("_hue").drop(columns=["_hue"])
     elif sort_choice.startswith("Trans"):
-        tmp = filtered.copy()
-        tmp["_t"] = tv
-        filtered = tmp.sort_values("_t", ascending=False).drop(columns=["_t"])
+        # Sort by transmission at first criterion wavelength
+        if app_state.advanced_search_wavelength_criteria:
+            first_wl = app_state.advanced_search_wavelength_criteria[0]["wavelength"]
+            idx = np.where(INTERP_GRID == first_wl)[0]
+            if idx.size > 0:
+                si = idx[0]
+                di = filtered.index.to_numpy()
+                tv = filter_matrix[di, si]
+                tmp = filtered.copy()
+                tmp["_t"] = tv
+                filtered = tmp.sort_values("_t", ascending=False).drop(columns=["_t"])
     elif sort_choice == "Filter Name":
         filtered = filtered.sort_values("Filter Name")
     else:
@@ -352,7 +475,7 @@ def _apply_reflector_search(df, reflector_matrix, app_state, on_change, containe
                             app_state.remove_from_default_reflectors(s)
                             on_change()
                         return _r
-                    ui.button("X", on_click=_make_rem()).props("dense flat size=sm color=negative").tooltip(
+                    ui.button("X", on_click=_make_rem()).props("dense outline size=sm color=negative").tooltip(
                         "Remove from defaults"
                     )
                 else:
@@ -361,7 +484,7 @@ def _apply_reflector_search(df, reflector_matrix, app_state, on_change, containe
                             app_state.add_to_default_reflectors(s)
                             on_change()
                         return _a
-                    ui.button("+", on_click=_make_add()).props("dense flat size=sm").tooltip(
+                    ui.button("+", on_click=_make_add()).props("dense outline size=sm").tooltip(
                         "Add to defaults"
                     )
 
@@ -595,3 +718,199 @@ def _import_reflectance_panel(on_change: Callable) -> None:
                 handle_error(f"ECOSIS import failed: {exc}")
 
         ui.button(UI_BUTTONS["import_ecosis_file"], on_click=_import_ecosis).props("dense color=primary")
+
+
+# ============================================================================
+# MY FILTERS MANAGEMENT PANEL
+# ============================================================================
+
+def render_my_filters_manager(
+    filter_collection,
+    app_state,
+    on_change: Callable,
+) -> None:
+    """Render the owned filters management panel.
+    
+    Shows individual search, manufacturer bulk controls, and owned/total counts.
+    """
+    with ui.card().classes("w-full"):
+        ui.label(UI_SECTIONS["my_filters_manager"]).classes("text-lg font-bold")
+        
+        owned = app_state.get_my_filters()
+        total = len(filter_collection.filters)
+        owned_count = len(owned)
+        
+        # Summary + mfr container ref for refreshing
+        summary_ref = [None]
+        mfr_results_ref = [None]
+        add_selector_ref = [None]
+        remove_selector_ref = [None]
+
+        summary_container = ui.row().classes("w-full items-center gap-2 mb-2")
+        summary_ref[0] = summary_container
+        with summary_container:
+            ui.label(f"Total: {owned_count}/{total} filters owned").classes("text-sm text-gray-600")
+
+        def _refresh_all():
+            """Refresh summary, manufacturer list, and selectors."""
+            current_owned = app_state.get_my_filters()
+            # Update summary
+            sc = summary_ref[0]
+            if sc:
+                sc.clear()
+                with sc:
+                    ui.label(f"Total: {len(current_owned)}/{total} filters owned").classes("text-sm text-gray-600")
+            # Update manufacturer rows
+            _refresh_manufacturer_list(
+                mfr_results_ref[0], filter_collection, app_state, on_change, _refresh_all
+            )
+            # Update filter selector options
+            asr = add_selector_ref[0]
+            if asr:
+                asr.options = sorted(filter_collection.get_display_names())
+                asr.update()
+            # Update remove selector options (only owned filters)
+            rsr = remove_selector_ref[0]
+            if rsr:
+                rsr.options = sorted(current_owned)
+                rsr.update()
+        
+        # ---- Add filters ----
+        ui.label("Add Filters").classes("text-sm font-semibold mt-1")
+        
+        def _on_filter_add(e):
+            """Add selected filter to owned list."""
+            if e.value:
+                filter_name = e.value
+                # Clear selection first
+                e.sender.value = None
+                # Add to owned list
+                app_state.add_to_my_filters(filter_name)
+                # Notify before refresh (to avoid deleted context)
+                ui.notify(f"Added: {filter_name}", type="positive")
+                # Refresh UI
+                _refresh_all()
+                on_change()
+        
+        all_filters = sorted(filter_collection.get_display_names())
+        add_selector = ui.select(
+            options=all_filters,
+            label="Search and select filter to add",
+            on_change=_on_filter_add,
+        ).props("use-chips dense outlined use-input input-debounce=300 clearable").classes("w-full")
+        add_selector_ref[0] = add_selector
+        
+        ui.separator().classes("my-2")
+        
+        # ---- Remove filters ----
+        ui.label("Remove Filters").classes("text-sm font-semibold")
+        
+        def _on_filter_remove(e):
+            """Remove selected filter from owned list."""
+            if e.value:
+                filter_name = e.value
+                # Clear selection first
+                e.sender.value = None
+                # Remove from owned list
+                app_state.remove_from_my_filters(filter_name)
+                # Notify before refresh (to avoid deleted context)
+                ui.notify(f"Removed: {filter_name}", type="info")
+                # Refresh UI
+                _refresh_all()
+                on_change()
+        
+        owned_filters = sorted(owned)
+        remove_selector = ui.select(
+            options=owned_filters,
+            label="Search and select filter to remove",
+            on_change=_on_filter_remove,
+        ).props("use-chips dense outlined use-input input-debounce=300 clearable").classes("w-full")
+        remove_selector_ref[0] = remove_selector
+        
+        ui.separator().classes("my-2")
+        
+        # ---- Manufacturer bulk controls ----
+        ui.label("Bulk Add/Remove by Manufacturer").classes("text-sm font-semibold")
+        
+        mfr_results_container = ui.column().classes("w-full gap-0")
+        mfr_results_ref[0] = mfr_results_container
+        
+        _render_manufacturer_list(
+            mfr_results_container, filter_collection, app_state, on_change, _refresh_all
+        )
+        
+        ui.separator().classes("my-2")
+        ui.button(
+            UI_BUTTONS["done"],
+            on_click=lambda: (setattr(app_state, "show_my_filters_manager", False), on_change()),
+        ).props("dense")
+
+
+def _render_manufacturer_list(container, filter_collection, app_state, on_change, refresh_fn):
+    """Render the full manufacturer list into container."""
+    owned = app_state.get_my_filters()
+    manufacturers = {}
+    for f in filter_collection.filters:
+        m = f.manufacturer
+        if m not in manufacturers:
+            manufacturers[m] = {"total": 0, "owned": 0}
+        manufacturers[m]["total"] += 1
+        if str(f) in owned:
+            manufacturers[m]["owned"] += 1
+    
+    with container:
+        for mfr in sorted(manufacturers.keys()):
+            stats = manufacturers[mfr]
+            _render_manufacturer_row(
+                mfr, stats["owned"], stats["total"],
+                filter_collection, app_state, on_change, refresh_fn,
+            )
+
+
+def _refresh_manufacturer_list(container, filter_collection, app_state, on_change, refresh_fn):
+    """Re-render manufacturer list after ownership changes."""
+    if container is None:
+        return
+    container.clear()
+    _render_manufacturer_list(container, filter_collection, app_state, on_change, refresh_fn)
+
+
+def _render_manufacturer_row(
+    manufacturer: str, owned_count: int, total_count: int,
+    filter_collection, app_state, on_change: Callable,
+    refresh_fn: Callable,
+) -> None:
+    """Render a single manufacturer row with counts and bulk buttons."""
+    all_owned = owned_count == total_count
+    none_owned = owned_count == 0
+    
+    with ui.row().classes("w-full items-center gap-2 py-1"):
+        # Manufacturer name and count
+        ui.label(manufacturer).classes("font-medium text-sm").style("min-width:200px")
+        
+        count_color = "text-green-600" if all_owned else ("text-gray-500" if none_owned else "text-orange-500")
+        ui.label(f"{owned_count}/{total_count}").classes(f"text-sm {count_color}").style("min-width:60px")
+        
+        # Add All button
+        def _add_all(m=manufacturer):
+            added = app_state.add_manufacturer_to_my_filters(m, filter_collection)
+            if added:
+                ui.notify(f"Added {added} filters from {m}", type="positive")
+                refresh_fn()
+                on_change()
+        
+        ui.button(UI_BUTTONS["add_all"], on_click=_add_all).props(
+            "dense outline size=sm" + (" disable" if all_owned else "")
+        )
+        
+        # Remove All button
+        def _remove_all(m=manufacturer):
+            removed = app_state.remove_manufacturer_from_my_filters(m, filter_collection)
+            if removed:
+                ui.notify(f"Removed {removed} filters from {m}", type="info")
+                refresh_fn()
+                on_change()
+        
+        ui.button(UI_BUTTONS["remove_all"], on_click=_remove_all).props(
+            "dense outline size=sm color=negative" + (" disable" if none_owned else "")
+        )

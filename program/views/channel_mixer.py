@@ -47,7 +47,7 @@ def render_channel_mixer_panel(
         # Header row
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("Channel Mixer").classes("text-lg font-bold")
-            ui.button("Reset", on_click=_reset).props("dense flat size=sm")
+            ui.button("Reset", on_click=_reset).props("dense outline size=sm")
 
         # Column headers
         with ui.grid(columns=4).classes("w-full gap-1"):
